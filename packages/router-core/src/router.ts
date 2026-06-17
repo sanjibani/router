@@ -1437,9 +1437,6 @@ export class RouterCore<
   ): Array<AnyRouteMatch> {
     const throwOnError = opts?.throwOnError
     const preload = opts?.preload
-    // Internal matching must prefer live owners over cached duplicates. The
-    // public getMatch is cached-first for compatibility, but using that here
-    // can seed preload children with stale cached parent context.
     const getExistingMatch = (matchId: string) =>
       this.stores.pendingMatchStores.get(matchId)?.get() ??
       this.stores.matchStores.get(matchId)?.get() ??
@@ -2504,7 +2501,7 @@ export class RouterCore<
           matches: this.stores.pendingMatches.get(),
           location: next,
           updateMatch: this.updateMatch,
-          onReady: () =>
+          onReady: (pendingMatches) =>
             new Promise<void>((resolve, reject) => {
               // Wrap batch in framework-specific transition wrapper (e.g., Solid's startTransition)
               this.startTransition(() => {
@@ -2522,7 +2519,6 @@ export class RouterCore<
                     // Commit the pending matches. If a previous match was
                     // removed, place it in the cachedMatches.
                     //
-                    const pendingMatches = this.stores.pendingMatches.get()
                     const currentMatches = this.stores.matches.get()
 
                     this.batch(() => {

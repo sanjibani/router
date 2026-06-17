@@ -544,6 +544,214 @@ describe('beforeLoad skip or exec', () => {
     })
   })
 
+  test('preload does not continue loader-owned descendants when joined active beforeLoad owner exits before settling', async () => {
+    vi.useFakeTimers()
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined)
+
+    try {
+      const parentBeforeLoadPromise = createControlledPromise<{ auth: string }>()
+      const parentBeforeLoad = vi.fn<BeforeLoad>(() => parentBeforeLoadPromise)
+      const childBeforeLoad = vi.fn<BeforeLoad>()
+      const childLoader = vi.fn(() => undefined)
+
+      const rootRoute = new BaseRootRoute({})
+      const indexRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/',
+      })
+      const parentRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/parent',
+        beforeLoad: parentBeforeLoad,
+        pendingMs: 1,
+        pendingComponent: {},
+      })
+      const childRoute = new BaseRoute({
+        getParentRoute: () => parentRoute,
+        path: '/child',
+        beforeLoad: childBeforeLoad,
+        loader: childLoader,
+      })
+      const otherRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/other',
+      })
+
+      const router = createTestRouter({
+        routeTree: rootRoute.addChildren([
+          indexRoute,
+          parentRoute.addChildren([childRoute]),
+          otherRoute,
+        ]),
+        history: createMemoryHistory({ initialEntries: ['/'] }),
+      })
+
+      await router.load()
+
+      const parentNavigation = router.navigate({ to: '/parent' })
+      await vi.waitFor(() => expect(parentBeforeLoad).toHaveBeenCalledTimes(1))
+
+      await vi.advanceTimersByTimeAsync(1)
+      await vi.waitFor(() =>
+        expect(
+          router.state.matches.some(
+            (match) =>
+              match.routeId === parentRoute.id && match.status === 'pending',
+          ),
+        ).toBe(true),
+      )
+
+      const preload = router.preloadRoute({ to: '/parent/child' })
+      await Promise.resolve()
+      expect(childBeforeLoad).not.toHaveBeenCalled()
+
+      const childCachedMatch = router.stores.cachedMatches
+        .get()
+        .find((match) => match.routeId === childRoute.id)!
+      const childLoadPromise = childCachedMatch._nonReactive.loadPromise
+      expect(childLoadPromise?.status).toBe('pending')
+
+      await router.navigate({ to: '/other' })
+
+      parentBeforeLoadPromise.resolve({ auth: 'late' })
+      await Promise.all([parentNavigation, preload])
+
+      expect(router.state.location.pathname).toBe('/other')
+      expect(childBeforeLoad).not.toHaveBeenCalled()
+      expect(childLoader).not.toHaveBeenCalled()
+      expect(
+        router.stores.cachedMatches
+          .get()
+          .some((match) => match.routeId === childRoute.id),
+      ).toBe(false)
+      expect(childLoadPromise?.status).toBe('resolved')
+    } finally {
+      consoleError.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  test('beforeLoad error commits only the renderable match prefix', async () => {
+    const parentHead = vi.fn(({ match }) => ({
+      meta: [{ title: match.error ? 'Parent error' : 'Parent success' }],
+    }))
+    const childHead = vi.fn(() => ({
+      meta: [{ title: 'Child success' }],
+    }))
+
+    const rootRoute = new BaseRootRoute({})
+    const parentRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/parent',
+      validateSearch: (search: Record<string, unknown>) => ({
+        fail: search.fail === true || search.fail === 'true',
+      }),
+      beforeLoad: ({ search }) => {
+        if (search.fail) {
+          throw new Error('Parent beforeLoad failed')
+        }
+      },
+      head: parentHead,
+    })
+    const childRoute = new BaseRoute({
+      getParentRoute: () => parentRoute,
+      path: '/child',
+      head: childHead,
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([parentRoute.addChildren([childRoute])]),
+      history: createMemoryHistory({
+        initialEntries: ['/parent/child?fail=false'],
+      }),
+    })
+
+    await router.load()
+
+    expect(router.state.matches.map((match) => match.routeId)).toContain(
+      childRoute.id,
+    )
+    expect(childHead).toHaveBeenCalledTimes(1)
+
+    await router.navigate({
+      to: '/parent/child',
+      search: { fail: true },
+    } as never)
+
+    expect(router.state.matches.map((match) => match.routeId)).toEqual([
+      rootRoute.id,
+      parentRoute.id,
+    ])
+    expect(
+      router.state.matches.find((match) => match.routeId === parentRoute.id)
+        ?.status,
+    ).toBe('error')
+    expect(parentHead).toHaveBeenCalledTimes(2)
+    expect(childHead).toHaveBeenCalledTimes(1)
+  })
+
+  test('loader error commits only the renderable match prefix', async () => {
+    const parentHead = vi.fn(({ match }) => ({
+      meta: [{ title: match.error ? 'Parent error' : 'Parent success' }],
+    }))
+    const childHead = vi.fn(() => ({
+      meta: [{ title: 'Child success' }],
+    }))
+
+    const rootRoute = new BaseRootRoute({})
+    const parentRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/parent',
+      validateSearch: (search: Record<string, unknown>) => ({
+        fail: search.fail === true || search.fail === 'true',
+      }),
+      loaderDeps: ({ search }) => ({ fail: search.fail }),
+      loader: (({ deps }) => {
+        if ((deps as { fail?: boolean }).fail) {
+          throw new Error('Parent loader failed')
+        }
+      }) as LoaderFn,
+      head: parentHead,
+    })
+    const childRoute = new BaseRoute({
+      getParentRoute: () => parentRoute,
+      path: '/child',
+      head: childHead,
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([parentRoute.addChildren([childRoute])]),
+      history: createMemoryHistory({
+        initialEntries: ['/parent/child?fail=false'],
+      }),
+    })
+
+    await router.load()
+
+    expect(router.state.matches.map((match) => match.routeId)).toContain(
+      childRoute.id,
+    )
+    expect(childHead).toHaveBeenCalledTimes(1)
+
+    await router.navigate({
+      to: '/parent/child',
+      search: { fail: true },
+    } as never)
+
+    expect(router.state.matches.map((match) => match.routeId)).toEqual([
+      rootRoute.id,
+      parentRoute.id,
+    ])
+    expect(
+      router.state.matches.find((match) => match.routeId === parentRoute.id)
+        ?.status,
+    ).toBe('error')
+    expect(parentHead).toHaveBeenCalledTimes(2)
+    expect(childHead).toHaveBeenCalledTimes(1)
+  })
+
   test('preload from onBeforeLoad waits for active root beforeLoad context', async () => {
     vi.useFakeTimers()
 
@@ -661,6 +869,334 @@ describe('beforeLoad skip or exec', () => {
       vi.useRealTimers()
     }
   })
+
+  test('preload does not settle descendant loader when joined active loader owner exits before settling', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const parentLoaderPromise = createControlledPromise<{ auth: string }>()
+      const parentLoader = vi.fn<LoaderFn>(() => parentLoaderPromise)
+      let childLoaderSettled = false
+      const childLoader = vi.fn<LoaderFn>(async ({ parentMatchPromise }) => {
+        await parentMatchPromise
+        childLoaderSettled = true
+      })
+      const childOnError = vi.fn()
+
+      const rootRoute = new BaseRootRoute({})
+      const indexRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/',
+      })
+      const parentRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/parent',
+        loader: parentLoader,
+        pendingMs: 1,
+        pendingComponent: {},
+      })
+      const childRoute = new BaseRoute({
+        getParentRoute: () => parentRoute,
+        path: '/child',
+        loader: childLoader,
+        onError: childOnError,
+      })
+      const otherRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/other',
+      })
+
+      const router = createTestRouter({
+        routeTree: rootRoute.addChildren([
+          indexRoute,
+          parentRoute.addChildren([childRoute]),
+          otherRoute,
+        ]),
+        history: createMemoryHistory({ initialEntries: ['/'] }),
+      })
+
+      await router.load()
+
+      const parentNavigation = router.navigate({ to: '/parent' })
+      await vi.waitFor(() => expect(parentLoader).toHaveBeenCalledTimes(1))
+
+      const preload = router.preloadRoute({ to: '/parent/child' })
+      await vi.advanceTimersByTimeAsync(5)
+      expect(parentLoader).toHaveBeenCalledTimes(1)
+      expect(childLoader).toHaveBeenCalledTimes(1)
+      expect(childLoaderSettled).toBe(false)
+
+      const childCachedMatch = router.stores.cachedMatches
+        .get()
+        .find((match) => match.routeId === childRoute.id)!
+      const childLoadPromise = childCachedMatch._nonReactive.loadPromise
+      const childLoaderPromise = childCachedMatch._nonReactive.loaderPromise
+      expect(childLoadPromise?.status).toBe('pending')
+      expect(childLoaderPromise?.status).toBe('pending')
+
+      await router.navigate({ to: '/other' })
+
+      parentLoaderPromise.resolve({ auth: 'late' })
+      await Promise.all([parentNavigation, preload])
+
+      expect(router.state.location.pathname).toBe('/other')
+      expect(childLoaderSettled).toBe(false)
+      expect(childOnError).not.toHaveBeenCalled()
+      expect(
+        router.stores.cachedMatches
+          .get()
+          .some((match) => match.routeId === childRoute.id),
+      ).toBe(false)
+      expect(childLoadPromise?.status).toBe('resolved')
+      expect(childLoaderPromise?.status).toBe('resolved')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('preload clears independently completed descendant when joined active loader owner exits', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const parentLoaderPromise = createControlledPromise<{ auth: string }>()
+      const parentLoader = vi.fn<LoaderFn>(() => parentLoaderPromise)
+      const childLoader = vi.fn<LoaderFn>(() => ({ child: 'preloaded' }))
+
+      const rootRoute = new BaseRootRoute({})
+      const indexRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/',
+      })
+      const parentRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/parent',
+        loader: parentLoader,
+        pendingMs: 1,
+        pendingComponent: {},
+      })
+      const childRoute = new BaseRoute({
+        getParentRoute: () => parentRoute,
+        path: '/child',
+        loader: childLoader,
+      })
+      const otherRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/other',
+      })
+
+      const router = createTestRouter({
+        routeTree: rootRoute.addChildren([
+          indexRoute,
+          parentRoute.addChildren([childRoute]),
+          otherRoute,
+        ]),
+        history: createMemoryHistory({ initialEntries: ['/'] }),
+      })
+
+      await router.load()
+
+      const parentNavigation = router.navigate({ to: '/parent' })
+      await vi.waitFor(() => expect(parentLoader).toHaveBeenCalledTimes(1))
+
+      const preload = router.preloadRoute({ to: '/parent/child' })
+      await vi.waitFor(() => expect(childLoader).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() =>
+        expect(
+          router.stores.cachedMatches
+            .get()
+            .some(
+              (match) =>
+                match.routeId === childRoute.id && match.status === 'success',
+            ),
+        ).toBe(true),
+      )
+
+      await router.navigate({ to: '/other' })
+
+      parentLoaderPromise.resolve({ auth: 'late' })
+      await Promise.all([parentNavigation, preload])
+
+      expect(router.state.location.pathname).toBe('/other')
+      expect(
+        router.stores.cachedMatches
+          .get()
+          .some((match) => match.routeId === childRoute.id),
+      ).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('preload resolves when joined active loader owner exits with a never-settling descendant loader', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const parentLoaderPromise = createControlledPromise<{ auth: string }>()
+      const childLoaderPromise = createControlledPromise<void>()
+      const parentLoader = vi.fn<LoaderFn>(() => parentLoaderPromise)
+      const childLoader = vi.fn<LoaderFn>(() => childLoaderPromise)
+
+      const rootRoute = new BaseRootRoute({})
+      const indexRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/',
+      })
+      const parentRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/parent',
+        loader: parentLoader,
+        pendingMs: 1,
+        pendingComponent: {},
+      })
+      const childRoute = new BaseRoute({
+        getParentRoute: () => parentRoute,
+        path: '/child',
+        loader: childLoader,
+      })
+      const otherRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/other',
+      })
+
+      const router = createTestRouter({
+        routeTree: rootRoute.addChildren([
+          indexRoute,
+          parentRoute.addChildren([childRoute]),
+          otherRoute,
+        ]),
+        history: createMemoryHistory({ initialEntries: ['/'] }),
+      })
+
+      await router.load()
+
+      const parentNavigation = router.navigate({ to: '/parent' })
+      await vi.waitFor(() => expect(parentLoader).toHaveBeenCalledTimes(1))
+
+      const preloadSettled = vi.fn()
+      const preload = router.preloadRoute({ to: '/parent/child' })
+      preload.then(preloadSettled)
+      await vi.waitFor(() => expect(childLoader).toHaveBeenCalledTimes(1))
+
+      await router.navigate({ to: '/other' })
+
+      parentLoaderPromise.resolve({ auth: 'late' })
+      await parentNavigation
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(preloadSettled).toHaveBeenCalledTimes(1)
+      expect(
+        router.stores.cachedMatches
+          .get()
+          .some((match) => match.routeId === childRoute.id),
+      ).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test.each([
+    {
+      name: 'without a never-settling descendant',
+      withNeverSettlingDescendant: false,
+    },
+    {
+      name: 'with a never-settling descendant',
+      withNeverSettlingDescendant: true,
+    },
+  ])(
+    'preload cancellation wins after earlier redirect rejection $name',
+    async ({ withNeverSettlingDescendant }) => {
+      vi.useFakeTimers()
+      const consoleError = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => undefined)
+
+      try {
+        const parentLoaderPromise = createControlledPromise<{ auth: string }>()
+        const hangLoaderPromise = createControlledPromise<void>()
+        const parentLoader = vi.fn<LoaderFn>(() => parentLoaderPromise)
+        const childLoader = vi.fn<LoaderFn>(() => {
+          throw redirect({ to: '/target' })
+        })
+        const hangLoader = vi.fn<LoaderFn>(() => hangLoaderPromise)
+        const targetLoader = vi.fn<LoaderFn>(() => undefined)
+
+        const rootRoute = new BaseRootRoute({})
+        const indexRoute = new BaseRoute({
+          getParentRoute: () => rootRoute,
+          path: '/',
+        })
+        const parentRoute = new BaseRoute({
+          getParentRoute: () => rootRoute,
+          path: '/parent',
+          loader: parentLoader,
+          pendingMs: 1,
+          pendingComponent: {},
+        })
+        const childRoute = new BaseRoute({
+          getParentRoute: () => parentRoute,
+          path: '/child',
+          loader: childLoader,
+        })
+        const hangRoute = new BaseRoute({
+          getParentRoute: () => childRoute,
+          path: '/hang',
+          loader: hangLoader,
+        })
+        const targetRoute = new BaseRoute({
+          getParentRoute: () => rootRoute,
+          path: '/target',
+          loader: targetLoader,
+        })
+        const otherRoute = new BaseRoute({
+          getParentRoute: () => rootRoute,
+          path: '/other',
+        })
+
+        const router = createTestRouter({
+          routeTree: rootRoute.addChildren([
+            indexRoute,
+            parentRoute.addChildren([childRoute.addChildren([hangRoute])]),
+            targetRoute,
+            otherRoute,
+          ]),
+          history: createMemoryHistory({ initialEntries: ['/'] }),
+        })
+
+        await router.load()
+
+        const parentNavigation = router.navigate({ to: '/parent' })
+        await vi.waitFor(() => expect(parentLoader).toHaveBeenCalledTimes(1))
+
+        const preloadSettled = vi.fn()
+        const preload = router.preloadRoute({
+          to: withNeverSettlingDescendant
+            ? '/parent/child/hang'
+            : '/parent/child',
+        })
+        preload.then(preloadSettled)
+
+        await vi.waitFor(() => expect(childLoader).toHaveBeenCalledTimes(1))
+        if (withNeverSettlingDescendant) {
+          await vi.waitFor(() => expect(hangLoader).toHaveBeenCalledTimes(1))
+        }
+
+        await router.navigate({ to: '/other' })
+
+        parentLoaderPromise.resolve({ auth: 'late' })
+        await parentNavigation
+        await vi.waitFor(() => expect(preloadSettled).toHaveBeenCalledTimes(1))
+
+        expect(router.state.location.pathname).toBe('/other')
+        expect(targetLoader).not.toHaveBeenCalled()
+        expect(consoleError).not.toHaveBeenCalled()
+      } finally {
+        consoleError.mockRestore()
+        vi.useRealTimers()
+      }
+    },
+  )
 
   test('preload from onBeforeLoad waits for active parent loader data', async () => {
     vi.useFakeTimers()
