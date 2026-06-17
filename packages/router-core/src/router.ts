@@ -2873,31 +2873,6 @@ export class RouterCore<
       ...this.stores.pendingIds.get(),
     ])
 
-    for (let i = 0; i < matches.length; i++) {
-      const id = matches[i]!.id
-      if (!activeMatchIds.has(id)) {
-        continue
-      }
-
-      const beforeLoadPromise =
-        this.getMatch(id)?._nonReactive.beforeLoadPromise
-      if (beforeLoadPromise) {
-        await beforeLoadPromise
-      }
-
-      const settledMatch = this.getMatch(id)
-      if (
-        !settledMatch ||
-        settledMatch._nonReactive.error ||
-        settledMatch.status === 'error' ||
-        settledMatch.status === 'notFound'
-      ) {
-        return matches
-      }
-
-      matches[i] = settledMatch
-    }
-
     // If the matches are already loaded, we need to add them to the cached matches.
     const matchesToCache = matches.filter(
       (match) =>
@@ -2915,7 +2890,6 @@ export class RouterCore<
         matches,
         location: next,
         preload: true,
-        preloadMatchIds: activeMatchIds,
         updateMatch: (id, updater) => {
           // Don't update matches that were active when the preload started.
           if (activeMatchIds.has(id)) {

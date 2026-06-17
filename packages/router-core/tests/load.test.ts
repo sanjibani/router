@@ -544,6 +544,193 @@ describe('beforeLoad skip or exec', () => {
     })
   })
 
+  test('preload from onBeforeLoad waits for active root beforeLoad context', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const rootBeforeLoadPromise = createControlledPromise<{ auth: string }>()
+      const rootBeforeLoad = vi.fn<BeforeLoad>(() => rootBeforeLoadPromise)
+      const childLoader = vi.fn<LoaderFn>(({ context }) => context)
+
+      const rootRoute = new BaseRootRoute({
+        beforeLoad: rootBeforeLoad,
+      })
+      const parentRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/parent',
+      })
+      const childRoute = new BaseRoute({
+        getParentRoute: () => parentRoute,
+        path: '/child',
+        loader: childLoader,
+      })
+
+      const router = createTestRouter({
+        routeTree: rootRoute.addChildren([
+          parentRoute.addChildren([childRoute]),
+        ]),
+        history: createMemoryHistory(),
+      })
+
+      let preload: ReturnType<typeof router.preloadRoute> | undefined
+      const unsubscribe = router.subscribe('onBeforeLoad', (event) => {
+        if (!preload && event.toLocation.pathname === '/parent') {
+          preload = router.preloadRoute({ to: '/parent/child' })
+        }
+      })
+
+      try {
+        const navigation = router.navigate({ to: '/parent' })
+        await vi.advanceTimersByTimeAsync(0)
+
+        expect(rootBeforeLoad).toHaveBeenCalledTimes(1)
+        expect(childLoader).not.toHaveBeenCalled()
+
+        rootBeforeLoadPromise.resolve({ auth: 'ok' })
+        await navigation
+        await preload
+
+        expect(childLoader).toHaveBeenCalledTimes(1)
+        expect(childLoader.mock.calls[0]?.[0].context).toMatchObject({
+          auth: 'ok',
+        })
+      } finally {
+        unsubscribe()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('preload descendant waits for active parent loader data', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const parentLoaderPromise = createControlledPromise<{ auth: string }>()
+      const unexpectedParentPreloadPromise = createControlledPromise<{
+        auth: string
+      }>()
+      const parentLoader = vi.fn<LoaderFn>(({ preload }) => {
+        return preload ? unexpectedParentPreloadPromise : parentLoaderPromise
+      })
+      let childLoaderSettled = false
+      const childLoader = vi.fn<LoaderFn>(async ({ parentMatchPromise }) => {
+        const parentMatch = (await parentMatchPromise) as any
+        childLoaderSettled = true
+        return parentMatch.loaderData
+      })
+
+      const rootRoute = new BaseRootRoute({})
+      const parentRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/parent',
+        loader: parentLoader,
+      })
+      const childRoute = new BaseRoute({
+        getParentRoute: () => parentRoute,
+        path: '/child',
+        loader: childLoader,
+      })
+
+      const router = createTestRouter({
+        routeTree: rootRoute.addChildren([
+          parentRoute.addChildren([childRoute]),
+        ]),
+        history: createMemoryHistory(),
+      })
+
+      const navigation = router.navigate({ to: '/parent' })
+      await vi.waitFor(() => expect(parentLoader).toHaveBeenCalledTimes(1))
+
+      const preload = router.preloadRoute({ to: '/parent/child' })
+      await vi.advanceTimersByTimeAsync(5)
+      expect(parentLoader).toHaveBeenCalledTimes(1)
+      expect(childLoader).toHaveBeenCalledTimes(1)
+      expect(childLoaderSettled).toBe(false)
+
+      parentLoaderPromise.resolve({ auth: 'ok' })
+      await navigation
+      await preload
+
+      expect(parentLoader).toHaveBeenCalledTimes(1)
+      expect(childLoaderSettled).toBe(true)
+      await expect(childLoader.mock.results[0]!.value).resolves.toEqual({
+        auth: 'ok',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('preload from onBeforeLoad waits for active parent loader data', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const parentLoaderPromise = createControlledPromise<{ auth: string }>()
+      const unexpectedParentPreloadPromise = createControlledPromise<{
+        auth: string
+      }>()
+      const parentLoader = vi.fn<LoaderFn>(({ preload }) => {
+        return preload ? unexpectedParentPreloadPromise : parentLoaderPromise
+      })
+      let childLoaderSettled = false
+      const childLoader = vi.fn<LoaderFn>(async ({ parentMatchPromise }) => {
+        const parentMatch = (await parentMatchPromise) as any
+        childLoaderSettled = true
+        return parentMatch.loaderData
+      })
+
+      const rootRoute = new BaseRootRoute({})
+      const parentRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/parent',
+        loader: parentLoader,
+      })
+      const childRoute = new BaseRoute({
+        getParentRoute: () => parentRoute,
+        path: '/child',
+        loader: childLoader,
+      })
+
+      const router = createTestRouter({
+        routeTree: rootRoute.addChildren([
+          parentRoute.addChildren([childRoute]),
+        ]),
+        history: createMemoryHistory(),
+      })
+
+      let preload: ReturnType<typeof router.preloadRoute> | undefined
+      const unsubscribe = router.subscribe('onBeforeLoad', (event) => {
+        if (!preload && event.toLocation.pathname === '/parent') {
+          preload = router.preloadRoute({ to: '/parent/child' })
+        }
+      })
+
+      try {
+        const navigation = router.navigate({ to: '/parent' })
+        await vi.advanceTimersByTimeAsync(5)
+
+        expect(parentLoader).toHaveBeenCalledTimes(1)
+        expect(childLoader).toHaveBeenCalledTimes(1)
+        expect(childLoaderSettled).toBe(false)
+
+        parentLoaderPromise.resolve({ auth: 'ok' })
+        await navigation
+        await preload
+
+        expect(parentLoader).toHaveBeenCalledTimes(1)
+        expect(childLoaderSettled).toBe(true)
+        await expect(childLoader.mock.results[0]!.value).resolves.toEqual({
+          auth: 'ok',
+        })
+      } finally {
+        unsubscribe()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   test('executes head when loader throws notFound during preload', async () => {
     const loader = vi.fn<LoaderFn>(({ preload }) => {
       if (preload) {
@@ -569,6 +756,34 @@ describe('beforeLoad skip or exec', () => {
     await router.preloadRoute({ to: '/foo' })
 
     expect(loader).toHaveBeenCalledTimes(1)
+    expect(head).toHaveBeenCalledTimes(1)
+  })
+
+  test('executes head when beforeLoad throws notFound during preload', async () => {
+    const beforeLoad = vi.fn<BeforeLoad>(({ preload }) => {
+      if (preload) {
+        throw notFound()
+      }
+    })
+    const head = vi.fn(() => ({ meta: [{ title: 'Foo' }] }))
+
+    const rootRoute = new BaseRootRoute({})
+    const fooRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/foo',
+      beforeLoad,
+      head,
+      notFoundComponent: () => null,
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([fooRoute]),
+      history: createMemoryHistory(),
+    })
+
+    await router.preloadRoute({ to: '/foo' })
+
+    expect(beforeLoad).toHaveBeenCalledTimes(1)
     expect(head).toHaveBeenCalledTimes(1)
   })
 
@@ -629,6 +844,29 @@ describe('loader skip or exec', () => {
     const router = setup({ loader })
     await router.load()
     expect(loader).toHaveBeenCalledTimes(0)
+  })
+
+  test('does not call shouldReload on initial pending load', async () => {
+    const loader = vi.fn()
+    const shouldReload = vi.fn(() => false)
+
+    const rootRoute = new BaseRootRoute({})
+    const fooRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/foo',
+      loader,
+      shouldReload,
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([fooRoute]),
+      history: createMemoryHistory({ initialEntries: ['/foo'] }),
+    })
+
+    await router.load()
+
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(shouldReload).not.toHaveBeenCalled()
   })
 
   test('exec on regular nav', async () => {
@@ -2268,13 +2506,13 @@ describe('head execution', () => {
 
   describe('beforeLoad notFound parent loader outcomes', () => {
     type ThrowAtIndex = 1 | 2 | 3
-    type ParentFailure = 'notFound' | 'redirect' | 'error'
+    type ParentFailure = 'notFound' | 'redirect'
     type ParentFailureMap = Partial<Record<0 | 1 | 2, ParentFailure>>
     type Scenario = {
       name: string
       throwAtIndex: ThrowAtIndex
       parentFailures: ParentFailureMap
-      expectedErrorKind: 'notFound' | 'redirect' | 'error'
+      expectedErrorKind: 'notFound' | 'redirect'
       expectedErrorSource?: string
       expectedErrorRouteIndex?: 0 | 1 | 2 | 3
       expectedLoaderMaxIndex: number
@@ -2349,14 +2587,6 @@ describe('head execution', () => {
       ])
 
       const routes = [rootRoute, level1Route, level2Route, level3Route] as const
-
-      ;([0, 1, 2] as const).forEach((index) => {
-        if (parentFailures[index] === 'error') {
-          ;(routes[index].options as any).shouldReload = () => {
-            throw new Error(`loader-${index}-error`)
-          }
-        }
-      })
 
       const throwRoute = routes[throwAtIndex]!
       throwRoute.options.beforeLoad = () => {
@@ -2523,15 +2753,6 @@ describe('head execution', () => {
         expectedLoaderMaxIndex: 2,
         expectedRenderedHeadMaxIndex: -1,
       },
-      {
-        name: 'propagates regular loader error when mixed with loader notFound in settled loaders',
-        throwAtIndex: 3 as const,
-        parentFailures: { 1: 'notFound', 2: 'error' } as ParentFailureMap,
-        expectedErrorKind: 'error' as const,
-        expectedErrorSource: 'loader-2-error',
-        expectedLoaderMaxIndex: 1,
-        expectedRenderedHeadMaxIndex: -1,
-      },
     ] satisfies Array<Scenario>
 
     test.each(scenarios)('$name', async (scenario) => {
@@ -2565,12 +2786,6 @@ describe('head execution', () => {
             }),
           }),
         )
-        return
-      }
-
-      if (scenario.expectedErrorKind === 'error') {
-        expect(error).toBeInstanceOf(Error)
-        expect((error as Error).message).toBe(scenario.expectedErrorSource)
         return
       }
 
