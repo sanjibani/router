@@ -68,31 +68,23 @@ const buildMatchContext = (
   return context
 }
 
-// Commits the merged context exactly when a match's beforeLoad phase settles.
-// Loader-phase updates intentionally leave context alone; loaders cannot change
-// the inputs used by buildMatchContext.
-const commitMatch = (
-  inner: InnerLoadContext,
-  matchId: string,
-  index: number,
-  patch: Partial<AnyRouteMatch>,
-): void => {
-  inner.updateMatch(matchId, (prev) => ({
-    ...prev,
-    ...patch,
-    context: buildMatchContext(inner, index),
-  }))
-}
-
 const patchMatch = (
   inner: InnerLoadContext,
   matchId: string,
   patch: Partial<AnyRouteMatch>,
+  contextIndex?: number,
 ): void => {
-  inner.updateMatch(matchId, (prev) => ({
-    ...prev,
-    ...patch,
-  }))
+  inner.updateMatch(matchId, (prev) => {
+    const next = {
+      ...prev,
+      ...patch,
+    }
+    if (contextIndex !== undefined) {
+      // Context is only recomputed when the beforeLoad/SSR-skip phase settles.
+      next.context = buildMatchContext(inner, contextIndex)
+    }
+    return next
+  })
 }
 
 const getNavigate = (inner: InnerLoadContext) => (opts: any) =>
@@ -300,15 +292,20 @@ const handleSerialError = (
 
   // A match that errors during the beforeLoad phase never reaches the loader
   // phase. Settle its promises after committing the error state.
-  commitMatch(inner, matchId, index, {
-    __beforeLoadContext: undefined,
-    error: err,
-    status: 'error',
-    isFetching: false,
-    _forcePending: undefined,
-    updatedAt: Date.now(),
-    abortController: new AbortController(),
-  })
+  patchMatch(
+    inner,
+    matchId,
+    {
+      __beforeLoadContext: undefined,
+      error: err,
+      status: 'error',
+      isFetching: false,
+      _forcePending: undefined,
+      updatedAt: Date.now(),
+      abortController: new AbortController(),
+    },
+    index,
+  )
 
   const updatedMatch = inner.router.getMatch(matchId)
   if (updatedMatch) {
@@ -482,10 +479,15 @@ const executeBeforeLoad = (
     inner.matches[index]!.__beforeLoadContext = undefined
     inner.router.batch(() => {
       pending()
-      commitMatch(inner, matchId, index, {
-        isFetching: false as const,
-        __beforeLoadContext: undefined,
-      })
+      patchMatch(
+        inner,
+        matchId,
+        {
+          isFetching: false as const,
+          __beforeLoadContext: undefined,
+        },
+        index,
+      )
     })
     settleBeforeLoadPromise(match)
     return
@@ -512,10 +514,15 @@ const executeBeforeLoad = (
 
     inner.router.batch(() => {
       pending()
-      commitMatch(inner, matchId, index, {
-        isFetching: false as const,
-        __beforeLoadContext: beforeLoadContext,
-      })
+      patchMatch(
+        inner,
+        matchId,
+        {
+          isFetching: false as const,
+          __beforeLoadContext: beforeLoadContext,
+        },
+        index,
+      )
     })
     settleBeforeLoadPromise(match)
   }
@@ -929,7 +936,7 @@ const loadRouteMatch = async (
 
     // the beforeLoad phase (and with it the context commit) does not run for
     // skipped matches, so commit the merged route context here
-    commitMatch(inner, matchId, index, { invalid: false })
+    patchMatch(inner, matchId, { invalid: false }, index)
 
     if (isServer ?? inner.router.isServer) {
       return inner.router.getMatch(matchId)!
@@ -1167,10 +1174,9 @@ export async function loadMatches(arg: {
 
     notFoundToThrow.routeId = boundaryMatch.routeId
 
-    commitMatch(
+    patchMatch(
       inner,
       boundaryMatch.id,
-      renderedBoundaryIndex,
       boundaryMatch.routeId === rootRouteId
         ? // For root boundary, use globalNotFound so the root component's
           // shell still renders and <Outlet> handles the not-found display,
@@ -1190,6 +1196,7 @@ export async function loadMatches(arg: {
             isFetching: false,
             _forcePending: undefined,
           },
+      renderedBoundaryIndex,
     )
 
     headMaxIndex = renderedBoundaryIndex
