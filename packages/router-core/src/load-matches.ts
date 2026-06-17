@@ -3,6 +3,7 @@ import { createControlledPromise, isPromise } from './utils'
 import { isNotFound } from './not-found'
 import { rootRouteId } from './root'
 import { isRedirect } from './redirect'
+import type { ControlledPromise } from './utils'
 import type { NotFoundError } from './not-found'
 import type { ParsedLocation } from './location'
 import type {
@@ -31,6 +32,7 @@ type InnerLoadContext = {
   matches: Array<AnyRouteMatch>
   /** Set only for preload passes. Contains active ids this preload must join, not mutate. */
   preload?: Set<string>
+  cancel?: ControlledPromise<void>
   forceStaleReload?: boolean
   onReady?: (matches: Array<AnyRouteMatch>) => Promise<void>
   sync?: boolean
@@ -40,15 +42,6 @@ const triggerOnReady = (inner: InnerLoadContext): void | Promise<void> => {
   if (!inner.rendered) {
     inner.rendered = true
     return inner.onReady?.(inner.matches)
-  }
-}
-
-const trimMatches = (inner: InnerLoadContext, index: number): void => {
-  if (index < inner.matches.length - 1) {
-    for (let i = index + 1; i < inner.matches.length; i++) {
-      clearMatchPromises(inner.matches[i]!)
-    }
-    inner.matches = inner.matches.slice(0, index + 1)
   }
 }
 
@@ -87,18 +80,7 @@ const joinPreloadedActiveMatch = async (
   waitForLoader: boolean,
 ): Promise<AnyRouteMatch> => {
   const matchId = inner.matches[index]!.id
-  const getMatch = (): AnyRouteMatch => {
-    const match = getActiveMatch(inner, matchId)
-    if (match) {
-      return match
-    }
-
-    inner.router.clearCache({
-      filter: (match) => inner.matches.includes(match),
-    })
-    throw inner
-  }
-  let match = getMatch()
+  let match = getActiveMatch(inner, matchId)!
   const route = inner.router.looseRoutesById[match.routeId]!
 
   const beforeLoadPromise =
@@ -110,7 +92,14 @@ const joinPreloadedActiveMatch = async (
       : undefined)
   if (beforeLoadPromise?.status === 'pending') {
     await beforeLoadPromise
-    match = getMatch()
+    match = getActiveMatch(inner, matchId)!
+    if (!match) {
+      inner.router.clearCache({
+        filter: (match) => inner.matches.includes(match),
+      })
+      inner.cancel?.resolve()
+      throw inner
+    }
   }
 
   inner.matches[index] = match
@@ -121,7 +110,14 @@ const joinPreloadedActiveMatch = async (
       match._nonReactive.loaderPromise || match._nonReactive.loadPromise
     if (loaderPromise?.status === 'pending') {
       await loaderPromise
-      match = getMatch()
+      match = getActiveMatch(inner, matchId)!
+      if (!match) {
+        inner.router.clearCache({
+          filter: (match) => inner.matches.includes(match),
+        })
+        inner.cancel?.resolve()
+        throw inner
+      }
     }
     inner.matches[index] = match
     error = match._nonReactive.error || match.error
@@ -525,12 +521,9 @@ const executeBeforeLoad = (
   }
 
   const beforeLoadPromise = createControlledPromise<void>()
-  const isCurrentBeforeLoad = () => {
-    return (
-      getLoadMatch(inner, matchId)?._nonReactive.beforeLoadPromise ===
-      beforeLoadPromise
-    )
-  }
+  const isCurrentBeforeLoad = () =>
+    getLoadMatch(inner, matchId)?._nonReactive.beforeLoadPromise ===
+    beforeLoadPromise
 
   // commits the result of the beforeLoad phase and settles its promise
   const updateContext = (beforeLoadContext: any) => {
@@ -705,11 +698,8 @@ const runLoader = async (
   const loaderBucket = match._nonReactive
   const loaderPromise = loaderBucket.loaderPromise
   const isCurrentLoader = () => loaderBucket.loaderPromise === loaderPromise
-  const getCurrentMatch = () => {
-    return isCurrentLoader()
-      ? getLoadMatch(inner, matchId)
-      : undefined
-  }
+  const getCurrentMatch = () =>
+    isCurrentLoader() ? getLoadMatch(inner, matchId) : undefined
 
   // Actually run the loader and handle the result
   try {
@@ -1019,7 +1009,6 @@ const loadRouteMatch = async (
   ) {
     return inner.matches[index]!
   }
-  inner.matches[index] = match
 
   clearTimeout(match._nonReactive.pendingTimeout)
   match._nonReactive.pendingTimeout = undefined
@@ -1038,7 +1027,7 @@ const loadRouteMatch = async (
     settleLoadPromises(match)
   }
 
-  return match
+  return (inner.matches[index] = match)
 }
 
 export async function loadMatches(arg: {
@@ -1052,6 +1041,9 @@ export async function loadMatches(arg: {
   sync?: boolean
 }): Promise<Array<MakeRouteMatch>> {
   const inner: InnerLoadContext = arg
+  const cancel = inner.preload
+    ? (inner.cancel = createControlledPromise<void>())
+    : undefined
   const matchPromises: Array<Promise<AnyRouteMatch>> = []
 
   // make sure the pending component is immediately rendered when hydrating a match that is not SSRed
@@ -1071,9 +1063,6 @@ export async function loadMatches(arg: {
       const beforeLoad = handleBeforeLoad(inner, i)
       if (isPromise(beforeLoad)) await beforeLoad
     } catch (err) {
-      if (err === inner) {
-        return inner.matches
-      }
       if (isNotFound(err)) {
         beforeLoadNotFound = err
       } else if (isRedirect(err) || !inner.preload) {
@@ -1105,22 +1094,9 @@ export async function loadMatches(arg: {
   try {
     await Promise.all(matchPromises)
   } catch (err) {
-    if (err === inner) {
-      return inner.matches
-    }
-
-    const preloadCancelled = createControlledPromise<void>()
-    for (const matchPromise of matchPromises) {
-      matchPromise.catch((err) => {
-        if (err === inner) {
-          preloadCancelled.resolve()
-        }
-      })
-    }
-    const settled = await Promise.race([
-      Promise.allSettled(matchPromises),
-      preloadCancelled,
-    ])
+    const settled = await (cancel
+      ? Promise.race([cancel, Promise.allSettled(matchPromises)])
+      : Promise.allSettled(matchPromises))
     if (!settled) {
       return inner.matches
     }
@@ -1130,9 +1106,6 @@ export async function loadMatches(arg: {
       if (result.status !== 'rejected') continue
 
       const reason = result.reason
-      if (reason === inner) {
-        return inner.matches
-      }
       if (isRedirect(reason)) {
         throw reason
       }
@@ -1200,7 +1173,7 @@ export async function loadMatches(arg: {
             isFetching: false,
             _forcePending: undefined,
             context,
-          },
+      },
     )
 
     renderMaxIndex = renderedBoundaryIndex
@@ -1225,8 +1198,8 @@ export async function loadMatches(arg: {
     await loadRouteChunk(errorRoute, ['errorComponent'])
   }
 
-  if (!notFoundToThrow) {
-    trimMatches(inner, renderMaxIndex)
+  while (!notFoundToThrow && inner.matches.length > renderMaxIndex + 1) {
+    clearMatchPromises(inner.matches.pop()!)
   }
 
   // serially execute heads once after loaders/notFound handling, ensuring
@@ -1234,8 +1207,7 @@ export async function loadMatches(arg: {
   for (let i = 0; i <= renderMaxIndex; i++) {
     const match = inner.matches[i]!
     const { id: matchId, routeId } = match
-    const route = inner.router.looseRoutesById[routeId]!
-    const routeOptions = route.options
+    const routeOptions = inner.router.looseRoutesById[routeId]!.options
     if (isJoinedPreload(inner, matchId)) {
       continue
     }

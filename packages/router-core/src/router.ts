@@ -2520,6 +2520,7 @@ export class RouterCore<
                     // removed, place it in the cachedMatches.
                     //
                     const currentMatches = this.stores.matches.get()
+                    const hasPendingMatches = pendingMatches.length
 
                     this.batch(() => {
                       this.stores.isLoading.set(false)
@@ -2529,7 +2530,7 @@ export class RouterCore<
                        * else must be dropped and have its stale loadPromise
                        * released so abandoned renders cannot stay suspended.
                        */
-                      if (pendingMatches.length) {
+                      if (hasPendingMatches) {
                         this.stores.setMatches(pendingMatches)
                         this.stores.setPending([])
                         const nextCachedMatches = [
@@ -2556,7 +2557,7 @@ export class RouterCore<
 
                     for (const match of currentMatches) {
                       if (
-                        pendingMatches.length &&
+                        hasPendingMatches &&
                         !pendingMatches.some((d) => d.routeId === match.routeId)
                       ) {
                         this.looseRoutesById[match.routeId]!.options.onLeave?.(
@@ -2565,7 +2566,7 @@ export class RouterCore<
                       }
                     }
 
-                    for (const match of pendingMatches.length
+                    for (const match of hasPendingMatches
                       ? pendingMatches
                       : currentMatches) {
                       const hook = currentMatches.some(
