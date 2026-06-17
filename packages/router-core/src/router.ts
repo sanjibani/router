@@ -779,7 +779,10 @@ export interface MatchRoutesFn {
   ): Array<AnyRouteMatch>
 }
 
-export type GetMatchFn = (matchId: string) => AnyRouteMatch | undefined
+export type GetMatchFn = (
+  matchId: string,
+  mode?: 'live',
+) => AnyRouteMatch | undefined
 
 export type UpdateMatchFn = (
   id: string,
@@ -1437,10 +1440,6 @@ export class RouterCore<
   ): Array<AnyRouteMatch> {
     const throwOnError = opts?.throwOnError
     const preload = opts?.preload
-    const getExistingMatch = (matchId: string) =>
-      this.stores.pendingMatchStores.get(matchId)?.get() ??
-      this.stores.matchStores.get(matchId)?.get() ??
-      this.stores.cachedMatchStores.get(matchId)?.get()
     const matchedRoutesResult = this.getMatchedRoutes(next.pathname)
     const { foundRoute, routeParams } = matchedRoutesResult
     let { matchedRoutes } = matchedRoutesResult
@@ -1558,7 +1557,7 @@ export class RouterCore<
         // explicit deps
         loaderDepsHash
 
-      const existingMatch = getExistingMatch(matchId)
+      const existingMatch = this.getMatch(matchId)
 
       const previousMatch = previousActiveMatchesByRouteId.get(route.id)
 
@@ -1684,7 +1683,7 @@ export class RouterCore<
     for (let index = 0; index < matches.length; index++) {
       const match = matches[index]!
       const route = this.looseRoutesById[match.routeId]!
-      const existingMatch = getExistingMatch(match.id)
+      const existingMatch = this.getMatch(match.id)
 
       // Update the match's params
       const previousMatch = previousActiveMatchesByRouteId.get(match.routeId)
@@ -2520,7 +2519,6 @@ export class RouterCore<
                     // removed, place it in the cachedMatches.
                     //
                     const currentMatches = this.stores.matches.get()
-                    const hasPendingMatches = pendingMatches.length
 
                     this.batch(() => {
                       this.stores.isLoading.set(false)
@@ -2530,7 +2528,7 @@ export class RouterCore<
                        * else must be dropped and have its stale loadPromise
                        * released so abandoned renders cannot stay suspended.
                        */
-                      if (hasPendingMatches) {
+                      if (pendingMatches.length) {
                         this.stores.setMatches(pendingMatches)
                         this.stores.setPending([])
                         const nextCachedMatches = [
@@ -2557,7 +2555,7 @@ export class RouterCore<
 
                     for (const match of currentMatches) {
                       if (
-                        hasPendingMatches &&
+                        pendingMatches.length &&
                         !pendingMatches.some((d) => d.routeId === match.routeId)
                       ) {
                         this.looseRoutesById[match.routeId]!.options.onLeave?.(
@@ -2566,7 +2564,7 @@ export class RouterCore<
                       }
                     }
 
-                    for (const match of hasPendingMatches
+                    for (const match of pendingMatches.length
                       ? pendingMatches
                       : currentMatches) {
                       const hook = currentMatches.some(
@@ -2713,12 +2711,13 @@ export class RouterCore<
     })
   }
 
-  getMatch: GetMatchFn = (matchId: string): AnyRouteMatch | undefined => {
-    return (
-      this.stores.cachedMatchStores.get(matchId)?.get() ??
+  getMatch: GetMatchFn = (matchId, mode) => {
+    const match =
       this.stores.pendingMatchStores.get(matchId)?.get() ??
       this.stores.matchStores.get(matchId)?.get()
-    )
+    return mode === 'live'
+      ? match
+      : (match ?? this.stores.cachedMatchStores.get(matchId)?.get())
   }
 
   /**
@@ -2893,14 +2892,7 @@ export class RouterCore<
         matches,
         location: next,
         preload: activeMatchIds,
-        updateMatch: (id, updater) => {
-          // Don't update matches that were active when the preload started.
-          if (activeMatchIds.has(id)) {
-            return
-          }
-
-          this.updateMatch(id, updater)
-        },
+        updateMatch: this.updateMatch,
       })
 
       return matches
