@@ -779,9 +779,13 @@ export interface MatchRoutesFn {
   ): Array<AnyRouteMatch>
 }
 
+/**
+ * Internal match lookup. By default this includes cached matches; pass
+ * `false` when checking whether a match still has an active/pending owner.
+ */
 export type GetMatchFn = (
   matchId: string,
-  mode?: 'live',
+  includeCached?: boolean,
 ) => AnyRouteMatch | undefined
 
 export type UpdateMatchFn = (
@@ -1430,10 +1434,6 @@ export class RouterCore<
     return this.matchRoutesInternal(pathnameOrNext, locationSearchOrOpts)
   }
 
-  private getParentContext(parentMatch?: AnyRouteMatch) {
-    return parentMatch?.context ?? this.options.context ?? undefined
-  }
-
   private matchRoutesInternal(
     next: ParsedLocation,
     opts?: MatchRoutesOpts,
@@ -1467,14 +1467,9 @@ export class RouterCore<
       : undefined
 
     const matches = new Array<AnyRouteMatch>(matchedRoutes.length)
-    // Snapshot of active match state keyed by routeId, used to stabilise
-    // params/search across navigations.
-    const previousActiveMatchesByRouteId = new Map<string, AnyRouteMatch>()
-    for (const store of this.stores.matchStores.values()) {
-      if (store.routeId) {
-        previousActiveMatchesByRouteId.set(store.routeId, store.get())
-      }
-    }
+    const previousActiveMatches = this.stores.matches.get()
+    const getPreviousMatch = (routeId: string) =>
+      previousActiveMatches.find((match) => match.routeId === routeId)
 
     for (let index = 0; index < matchedRoutes.length; index++) {
       const route = matchedRoutes[index]!
@@ -1559,7 +1554,7 @@ export class RouterCore<
 
       const existingMatch = this.getMatch(matchId)
 
-      const previousMatch = previousActiveMatchesByRouteId.get(route.id)
+      const previousMatch = getPreviousMatch(route.id)
 
       const strictParams = existingMatch?._strictParams ?? usedParams
 
@@ -1669,7 +1664,7 @@ export class RouterCore<
       // update the searchError if there is one
       match.searchError = searchError
 
-      const parentContext = this.getParentContext(parentMatch)
+      const parentContext = parentMatch?.context ?? this.options.context
 
       match.context = {
         ...parentContext,
@@ -1682,18 +1677,18 @@ export class RouterCore<
 
     for (let index = 0; index < matches.length; index++) {
       const match = matches[index]!
-      const route = this.looseRoutesById[match.routeId]!
+      const route = matchedRoutes[index]!
       const existingMatch = this.getMatch(match.id)
 
       // Update the match's params
-      const previousMatch = previousActiveMatchesByRouteId.get(match.routeId)
+      const previousMatch = getPreviousMatch(match.routeId)
       match.params = previousMatch
         ? nullReplaceEqualDeep(previousMatch.params, routeParams)
         : routeParams
 
       if (!existingMatch) {
         const parentMatch = matches[index - 1]
-        const parentContext = this.getParentContext(parentMatch)
+        const parentContext = parentMatch?.context ?? this.options.context
 
         // Update the match's context
 
@@ -2499,87 +2494,75 @@ export class RouterCore<
           forceStaleReload: previousLocation.href === next.href,
           matches: this.stores.pendingMatches.get(),
           location: next,
-          updateMatch: this.updateMatch,
           onReady: (pendingMatches) =>
             new Promise<void>((resolve, reject) => {
               // Wrap batch in framework-specific transition wrapper (e.g., Solid's startTransition)
               this.startTransition(() => {
-                if (this.latestLoadPromise !== loadPromise) {
-                  resolve()
-                  return
-                }
+                this.startViewTransition(async () => {
+                  if (this.latestLoadPromise !== loadPromise) {
+                    return
+                  }
 
-                try {
-                  this.startViewTransition(async () => {
-                    if (this.latestLoadPromise !== loadPromise) {
-                      return
-                    }
+                  // Commit the pending matches. If a previous match was
+                  // removed, place it in the cachedMatches.
+                  //
+                  const currentMatches = this.stores.matches.get()
 
-                    // Commit the pending matches. If a previous match was
-                    // removed, place it in the cachedMatches.
-                    //
-                    const currentMatches = this.stores.matches.get()
-
-                    this.batch(() => {
-                      this.stores.isLoading.set(false)
-                      this.stores.loadedAt.set(Date.now())
-                      /**
-                       * Only successful exiting matches are reusable. Everything
-                       * else must be dropped and have its stale loadPromise
-                       * released so abandoned renders cannot stay suspended.
-                       */
-                      if (pendingMatches.length) {
-                        this.stores.setMatches(pendingMatches)
-                        this.stores.setPending([])
-                        const nextCachedMatches = [
-                          ...this.stores.cachedMatches.get(),
-                        ]
-                        for (const match of currentMatches) {
-                          // Exiting uses match.id (routeId + params + loaderDeps),
-                          // so changing loader deps correctly caches the old entry.
-                          if (!pendingMatches.some((d) => d.id === match.id)) {
-                            if (
-                              match.status === 'success' &&
-                              !isRedirect(match._nonReactive.error)
-                            ) {
-                              nextCachedMatches.push(match)
-                            } else {
-                              clearMatchPromises(match)
-                            }
+                  this.batch(() => {
+                    this.stores.isLoading.set(false)
+                    this.stores.loadedAt.set(Date.now())
+                    /**
+                     * Only successful exiting matches are reusable. Everything
+                     * else must be dropped and have its stale loadPromise
+                     * released so abandoned renders cannot stay suspended.
+                     */
+                    if (pendingMatches.length) {
+                      this.stores.setMatches(pendingMatches)
+                      this.stores.setPending([])
+                      const nextCachedMatches = [
+                        ...this.stores.cachedMatches.get(),
+                      ]
+                      for (const match of currentMatches) {
+                        // Exiting uses match.id (routeId + params + loaderDeps),
+                        // so changing loader deps correctly caches the old entry.
+                        if (!pendingMatches.some((d) => d.id === match.id)) {
+                          if (
+                            match.status === 'success' &&
+                            !isRedirect(match._nonReactive.error)
+                          ) {
+                            nextCachedMatches.push(match)
+                          } else {
+                            clearMatchPromises(match)
                           }
                         }
-                        this.stores.setCached(nextCachedMatches)
-                        this.clearExpiredCache()
                       }
-                    })
-
-                    for (const match of currentMatches) {
-                      if (
-                        pendingMatches.length &&
-                        !pendingMatches.some((d) => d.routeId === match.routeId)
-                      ) {
-                        this.looseRoutesById[match.routeId]!.options.onLeave?.(
-                          match,
-                        )
-                      }
+                      this.stores.setCached(nextCachedMatches)
+                      this.clearExpiredCache()
                     }
+                  })
 
-                    for (const match of pendingMatches.length
-                      ? pendingMatches
-                      : currentMatches) {
-                      const hook = currentMatches.some(
-                        (d) => d.routeId === match.routeId,
-                      )
-                        ? 'onStay'
-                        : 'onEnter'
-                      this.looseRoutesById[match.routeId]!.options[hook]?.(
+                  for (const match of currentMatches) {
+                    if (
+                      pendingMatches.length &&
+                      !pendingMatches.some((d) => d.routeId === match.routeId)
+                    ) {
+                      this.looseRoutesById[match.routeId]!.options.onLeave?.(
                         match,
                       )
                     }
-                  }).then(resolve, reject)
-                } catch (err) {
-                  reject(err)
-                }
+                  }
+
+                  for (const match of pendingMatches.length
+                    ? pendingMatches
+                    : currentMatches) {
+                    const hook = currentMatches.some(
+                      (d) => d.routeId === match.routeId,
+                    )
+                      ? 'onStay'
+                      : 'onEnter'
+                    this.looseRoutesById[match.routeId]!.options[hook]?.(match)
+                  }
+                }).then(resolve, reject)
               })
             }),
         })
@@ -2681,43 +2664,34 @@ export class RouterCore<
   }
 
   updateMatch: UpdateMatchFn = (id, updater) => {
-    this.startTransition(() => {
-      const pendingMatch = this.stores.pendingMatchStores.get(id)
-      if (pendingMatch) {
-        pendingMatch.set(updater)
-        return
-      }
+    const matchStore =
+      this.stores.pendingMatchStores.get(id) ?? this.stores.matchStores.get(id)
+    if (matchStore) {
+      matchStore.set(updater)
+      return
+    }
 
-      const activeMatch = this.stores.matchStores.get(id)
-      if (activeMatch) {
-        activeMatch.set(updater)
-        return
+    const cachedMatch = this.stores.cachedMatchStores.get(id)
+    if (cachedMatch) {
+      const match = cachedMatch.get()
+      const next = updater(match)
+      if (next.status !== 'success' && next.status !== 'pending') {
+        this.clearCache({ filter: (d) => d.id === id })
+      } else {
+        cachedMatch.set(next)
       }
-
-      const cachedMatch = this.stores.cachedMatchStores.get(id)
-      if (cachedMatch) {
-        const match = cachedMatch.get()
-        const next = updater(match)
-        if (next.status !== 'success' && next.status !== 'pending') {
-          clearMatchPromises(match)
-          this.stores.cachedMatchStores.delete(id)
-          this.stores.cachedIds.set((prev) =>
-            prev.filter((matchId) => matchId !== id),
-          )
-        } else {
-          cachedMatch.set(next)
-        }
-      }
-    })
+    }
   }
 
-  getMatch: GetMatchFn = (matchId, mode) => {
-    const match =
-      this.stores.pendingMatchStores.get(matchId)?.get() ??
-      this.stores.matchStores.get(matchId)?.get()
-    return mode === 'live'
-      ? match
-      : (match ?? this.stores.cachedMatchStores.get(matchId)?.get())
+  getMatch: GetMatchFn = (matchId, includeCached) => {
+    const matchStore =
+      this.stores.pendingMatchStores.get(matchId) ??
+      this.stores.matchStores.get(matchId)
+    return (
+      includeCached === false
+        ? matchStore
+        : (matchStore ?? this.stores.cachedMatchStores.get(matchId))
+    )?.get()
   }
 
   /**
@@ -2892,7 +2866,6 @@ export class RouterCore<
         matches,
         location: next,
         preload: activeMatchIds,
-        updateMatch: this.updateMatch,
       })
 
       return matches

@@ -551,7 +551,9 @@ describe('beforeLoad skip or exec', () => {
       .mockImplementation(() => undefined)
 
     try {
-      const parentBeforeLoadPromise = createControlledPromise<{ auth: string }>()
+      const parentBeforeLoadPromise = createControlledPromise<{
+        auth: string
+      }>()
       const parentBeforeLoad = vi.fn<BeforeLoad>(() => parentBeforeLoadPromise)
       const childBeforeLoad = vi.fn<BeforeLoad>()
       const childLoader = vi.fn(() => undefined)
@@ -1677,7 +1679,6 @@ describe('loader skip or exec', () => {
         router,
         location,
         matches,
-        updateMatch: router.updateMatch,
       }),
     ).rejects.toMatchObject({
       options: expect.objectContaining({ to: '/bar' }),
@@ -3331,7 +3332,6 @@ describe('head execution', () => {
         router,
         location,
         matches,
-        updateMatch: router.updateMatch,
       }),
     ).rejects.toBe(beforeLoadError)
 
@@ -3373,7 +3373,6 @@ describe('head execution', () => {
         router,
         location,
         matches,
-        updateMatch: router.updateMatch,
       }),
     ).rejects.toBe(beforeLoadError)
 
@@ -3422,7 +3421,6 @@ describe('head execution', () => {
         router,
         location,
         matches,
-        updateMatch: router.updateMatch,
       }),
     ).rejects.toBe(beforeLoadError)
 
@@ -3561,7 +3559,6 @@ describe('head execution', () => {
           router,
           location,
           matches,
-          updateMatch: router.updateMatch,
         })
         return { error: undefined, matches }
       } catch (error) {
@@ -3846,7 +3843,6 @@ describe('head execution', () => {
           router,
           location,
           matches,
-          updateMatch: router.updateMatch,
         }),
       ).resolves.toBe(matches)
 

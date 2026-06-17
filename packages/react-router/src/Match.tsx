@@ -326,8 +326,7 @@ export const MatchInner = React.memo(function MatchInnerImpl({
     const routeId = match.routeId as string
     const route = router.routesById[routeId] as AnyRoute
     const remountFn =
-      (router.routesById[routeId] as AnyRoute).options.remountDeps ??
-      router.options.defaultRemountDeps
+      route.options.remountDeps ?? router.options.defaultRemountDeps
     const remountDeps = remountFn?.({
       routeId,
       loaderDeps: match.loaderDeps,
@@ -397,8 +396,7 @@ export const MatchInner = React.memo(function MatchInnerImpl({
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const key = React.useMemo(() => {
     const remountFn =
-      (router.routesById[routeId] as AnyRoute).options.remountDeps ??
-      router.options.defaultRemountDeps
+      route.options.remountDeps ?? router.options.defaultRemountDeps
     const remountDeps = remountFn?.({
       routeId,
       loaderDeps: match.loaderDeps,
@@ -411,8 +409,8 @@ export const MatchInner = React.memo(function MatchInnerImpl({
     match.loaderDeps,
     match._strictParams,
     match._strictSearch,
+    route.options.remountDeps,
     router.options.defaultRemountDeps,
-    router.routesById,
   ])
 
   // eslint-disable-next-line react-hooks/rules-of-hooks

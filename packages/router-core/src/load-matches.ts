@@ -13,7 +13,7 @@ import type {
   SsrContextOptions,
 } from './route'
 import type { AnyRouteMatch, MakeRouteMatch } from './Matches'
-import type { AnyRouter, SSROption, UpdateMatchFn } from './router'
+import type { AnyRouter, SSROption } from './router'
 
 /**
  * An object of this shape is created when calling `loadMatches`.
@@ -28,7 +28,6 @@ type InnerLoadContext = {
   firstBadMatchIndex?: number
   /** mutable state, scoped to a `loadMatches` call */
   rendered?: boolean
-  updateMatch: UpdateMatchFn
   matches: Array<AnyRouteMatch>
   /** Set only for preload passes. Contains active ids this preload must join, not mutate. */
   preload?: Set<string>
@@ -70,12 +69,13 @@ const joinPreloadedActiveMatch = async (
     throw inner
   }
   const cancelIfOwnerMissing = () => {
-    if (!inner.router.getMatch(matchId, 'live')) {
+    // Cached matches do not prove a borrowed active/pending owner still exists.
+    if (!inner.router.getMatch(matchId, false)) {
       cancelJoinedPreload()
     }
   }
 
-  let match = inner.router.getMatch(matchId, 'live') ?? throwCancelledPreload()
+  let match = inner.router.getMatch(matchId, false) ?? throwCancelledPreload()
   const route = inner.router.looseRoutesById[match.routeId]!
 
   const beforeLoadPromise =
@@ -87,7 +87,7 @@ const joinPreloadedActiveMatch = async (
       : undefined)
   if (beforeLoadPromise?.status === 'pending') {
     await beforeLoadPromise
-    match = inner.router.getMatch(matchId, 'live') ?? throwCancelledPreload()
+    match = inner.router.getMatch(matchId, false) ?? throwCancelledPreload()
   }
 
   inner.matches[index] = match
@@ -98,7 +98,7 @@ const joinPreloadedActiveMatch = async (
       match._nonReactive.loaderPromise || match._nonReactive.loadPromise
     if (loaderPromise?.status === 'pending') {
       await loaderPromise
-      match = inner.router.getMatch(matchId, 'live') ?? throwCancelledPreload()
+      match = inner.router.getMatch(matchId, false) ?? throwCancelledPreload()
     }
     inner.matches[index] = match
     error = match._nonReactive.error || match.error
@@ -148,7 +148,7 @@ const commitMatch = (
     return
   }
 
-  inner.updateMatch(matchId, (prev) => ({
+  inner.router.updateMatch(matchId, (prev) => ({
     ...prev,
     ...patch,
   }))
@@ -1030,7 +1030,6 @@ export async function loadMatches(arg: {
   preload?: Set<string>
   forceStaleReload?: boolean
   onReady?: (matches: Array<AnyRouteMatch>) => Promise<void>
-  updateMatch: UpdateMatchFn
   sync?: boolean
 }): Promise<Array<MakeRouteMatch>> {
   const inner: InnerLoadContext = arg
@@ -1103,29 +1102,27 @@ export async function loadMatches(arg: {
   }
 
   if (settled) {
-    if (
-      inner.preload &&
-      settled.some(
-        (result) => result.status === 'rejected' && result.reason === inner,
-      )
-    ) {
-      return inner.matches
-    }
-
+    let firstRedirect: unknown
     let firstUnhandledRejection: unknown
 
     for (const result of settled) {
       if (result.status !== 'rejected') continue
 
       const reason = result.reason
-      if (isRedirect(reason)) {
-        throw reason
+      if (inner.preload && reason === inner) {
+        return inner.matches
       }
-      if (isNotFound(reason)) {
+      if (isRedirect(reason)) {
+        firstRedirect ??= reason
+      } else if (isNotFound(reason)) {
         firstNotFound ??= reason
       } else {
         firstUnhandledRejection ??= reason
       }
+    }
+
+    if (firstRedirect) {
+      throw firstRedirect
     }
 
     if (firstUnhandledRejection !== undefined) {

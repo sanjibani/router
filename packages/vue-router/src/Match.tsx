@@ -409,22 +409,18 @@ export const MatchInner = Vue.defineComponent({
         const pendingMinMs =
           route.value.options.pendingMinMs ?? router.options.defaultPendingMinMs
 
-        const routerMatch = router.getMatch(match.value.id)
-        if (
-          pendingMinMs &&
-          routerMatch &&
-          !routerMatch._nonReactive.minPendingPromise
-        ) {
+        const matchBucket = Vue.toRaw(match.value._nonReactive)
+        if (pendingMinMs && !matchBucket.minPendingPromise) {
           // Create a promise that will resolve after the minPendingMs
           if (!(isServer ?? router.isServer)) {
             const minPendingPromise = createControlledPromise<void>()
 
-            routerMatch._nonReactive.minPendingPromise = minPendingPromise
+            matchBucket.minPendingPromise = minPendingPromise
 
             setTimeout(() => {
               minPendingPromise.resolve()
               // We've handled the minPendingPromise, so we can delete it
-              routerMatch._nonReactive.minPendingPromise = undefined
+              matchBucket.minPendingPromise = undefined
             }, pendingMinMs)
           }
         }

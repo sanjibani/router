@@ -255,6 +255,7 @@ export const MatchInner = (): any => {
         error: currentMatch.error,
         _forcePending: currentMatch._forcePending ?? false,
         _displayPending: currentMatch._displayPending ?? false,
+        _nonReactive: currentMatch._nonReactive,
       },
     }
   })
@@ -268,6 +269,19 @@ export const MatchInner = (): any => {
 
         const componentKey = () =>
           currentMatchState().key ?? currentMatchState().match.id
+
+        const PendingComponent = () =>
+          route().options.pendingComponent ?? router.options.defaultPendingComponent
+
+        const pendingReplacement = () => {
+          const pendingMatch = router.stores.pendingMatches
+            .get()
+            .find((pending) => pending.routeId === currentMatchState().routeId)
+          return (
+            pendingMatch?.status === 'pending' &&
+            pendingMatch.id !== currentMatch().id
+          )
+        }
 
         const out = () => {
           const Comp =
@@ -289,9 +303,7 @@ export const MatchInner = (): any => {
             <Solid.Match when={currentMatch()._displayPending}>
               {(_) => {
                 const [displayPendingResult] = Solid.createResource(
-                  () =>
-                    router.getMatch(currentMatch().id)?._nonReactive
-                      .displayPendingPromise,
+                  () => currentMatch()._nonReactive.displayPendingPromise,
                 )
 
                 return <>{displayPendingResult()}</>
@@ -300,12 +312,18 @@ export const MatchInner = (): any => {
             <Solid.Match when={currentMatch()._forcePending}>
               {(_) => {
                 const [minPendingResult] = Solid.createResource(
-                  () =>
-                    router.getMatch(currentMatch().id)?._nonReactive
-                      .minPendingPromise,
+                  () => currentMatch()._nonReactive.minPendingPromise,
                 )
 
                 return <>{minPendingResult()}</>
+              }}
+            </Solid.Match>
+            <Solid.Match when={pendingReplacement()}>
+              {(_) => {
+                const FallbackComponent = PendingComponent()
+                return FallbackComponent ? (
+                  <Dynamic component={FallbackComponent} />
+                ) : null
               }}
             </Solid.Match>
             <Solid.Match when={currentMatch().status === 'pending'}>
@@ -313,24 +331,20 @@ export const MatchInner = (): any => {
                 const pendingMinMs =
                   route().options.pendingMinMs ??
                   router.options.defaultPendingMinMs
+                const matchBucket = currentMatch()._nonReactive
 
                 if (pendingMinMs) {
-                  const routerMatch = router.getMatch(currentMatch().id)
-                  if (
-                    routerMatch &&
-                    !routerMatch._nonReactive.minPendingPromise
-                  ) {
+                  if (!matchBucket.minPendingPromise) {
                     // Create a promise that will resolve after the minPendingMs
                     if (!(isServer ?? router.isServer)) {
                       const minPendingPromise = createControlledPromise<void>()
 
-                      routerMatch._nonReactive.minPendingPromise =
-                        minPendingPromise
+                      matchBucket.minPendingPromise = minPendingPromise
 
                       setTimeout(() => {
                         minPendingPromise.resolve()
                         // We've handled the minPendingPromise, so we can delete it
-                        routerMatch._nonReactive.minPendingPromise = undefined
+                        matchBucket.minPendingPromise = undefined
                       }, pendingMinMs)
                     }
                   }
@@ -338,13 +352,10 @@ export const MatchInner = (): any => {
 
                 const [loaderResult] = Solid.createResource(async () => {
                   await Promise.resolve()
-                  return router.getMatch(currentMatch().id)?._nonReactive
-                    .loadPromise
+                  return matchBucket.loadPromise
                 })
 
-                const FallbackComponent =
-                  route().options.pendingComponent ??
-                  router.options.defaultPendingComponent
+                const FallbackComponent = PendingComponent()
 
                 return (
                   <>
