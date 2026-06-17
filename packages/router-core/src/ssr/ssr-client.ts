@@ -298,10 +298,10 @@ export async function hydrate(router: AnyRouter): Promise<any> {
           router.stores.resolvedLocation.set(router.stores.location.get())
         }
         // hide the pending component once the load is finished
+        match._nonReactive.displayPendingPromise = undefined
         router.updateMatch(match.id, (prev) => ({
           ...prev,
           _displayPending: undefined,
-          displayPendingPromise: undefined,
         }))
       })
     })

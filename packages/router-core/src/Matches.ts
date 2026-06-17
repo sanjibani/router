@@ -131,7 +131,7 @@ export interface RouteMatch<
   pathname: string
   params: TAllParams
   _strictParams: TAllParams
-  status: 'pending' | 'success' | 'error' | 'redirected' | 'notFound'
+  status: 'pending' | 'success' | 'error' | 'notFound'
   isFetching: false | 'beforeLoad' | 'loader'
   error: unknown
   paramsError: unknown

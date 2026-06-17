@@ -138,7 +138,7 @@ describe("Store doesn't update *too many* times during navigation", () => {
     // that needs to be done during a navigation.
     // Any change that increases this number should be investigated.
     // Note: Vue has different update counts than React/Solid due to different reactivity
-    expect(updates).toBe(16)
+    expect(updates).toBe(15)
   })
 
   test('redirection in preload', async () => {
@@ -158,6 +158,11 @@ describe("Store doesn't update *too many* times during navigation", () => {
     // Any change that increases this number should be investigated.
     // Note: Vue has different update counts than React/Solid due to different reactivity
     expect(updates).toBe(5)
+    expect(
+      router.stores.cachedMatches
+        .get()
+        .some((match) => match.pathname === '/posts'),
+    ).toBe(false)
   })
 
   test('sync beforeLoad', async () => {
@@ -202,7 +207,7 @@ describe("Store doesn't update *too many* times during navigation", () => {
     // that needs to be done during a navigation.
     // Any change that increases this number should be investigated.
     // Note: Vue has different update counts than React/Solid due to different reactivity
-    expect(updates).toBe(9)
+    expect(updates).toBe(8)
   })
 
   test('hover preload, then navigate, w/ async loaders', async () => {
@@ -229,7 +234,7 @@ describe("Store doesn't update *too many* times during navigation", () => {
     // that needs to be done during a navigation.
     // Any change that increases this number should be investigated.
     // Note: Vue has different update counts than React/Solid due to different reactivity
-    expect(updates).toBe(17)
+    expect(updates).toBe(13)
   })
 
   test('navigate, w/ preloaded & async loaders', async () => {
@@ -246,7 +251,7 @@ describe("Store doesn't update *too many* times during navigation", () => {
     // that needs to be done during a navigation.
     // Any change that increases this number should be investigated.
     // Note: Vue has different update counts than React/Solid due to different reactivity
-    expect(updates).toBe(10)
+    expect(updates).toBe(8)
   })
 
   test('navigate, w/ preloaded & sync loaders', async () => {

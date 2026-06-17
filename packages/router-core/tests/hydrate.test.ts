@@ -517,4 +517,167 @@ describe('hydrate', () => {
 
     consoleSpy.mockRestore()
   })
+
+  it('should clear SPA displayPendingPromise when load finishes', async () => {
+    let resolveLoad!: () => void
+    const loadPromise = new Promise<void>((resolve) => {
+      resolveLoad = resolve
+    })
+    vi.spyOn(mockRouter, 'load').mockReturnValue(loadPromise)
+
+    const matches = mockRouter.matchRoutes(mockRouter.stores.location.get())
+    mockRouter.matchRoutes = vi.fn().mockReturnValue(matches)
+
+    mockWindow.$_TSR = {
+      router: {
+        manifest: testManifest,
+        dehydratedData: {},
+        lastMatchId: '/not-the-current-leaf',
+        matches: [
+          {
+            i: matches[0].id,
+            s: 'success',
+            ssr: true,
+            u: Date.now(),
+          },
+        ],
+      },
+      h: vi.fn(),
+      e: vi.fn(),
+      c: vi.fn(),
+      p: vi.fn(),
+      buffer: [],
+      initialized: false,
+    }
+
+    await hydrate(mockRouter)
+    await Promise.resolve()
+
+    const match = mockRouter.stores.matches.get()[1] as AnyRouteMatch
+    const displayPendingPromise = match._nonReactive.displayPendingPromise
+
+    expect(match._displayPending).toBe(true)
+    expect(displayPendingPromise).toBeDefined()
+
+    resolveLoad()
+    await displayPendingPromise
+    await Promise.resolve()
+
+    const updatedMatch = mockRouter.getMatch(match.id) as AnyRouteMatch
+    expect(updatedMatch._displayPending).toBeUndefined()
+    expect(updatedMatch._nonReactive.displayPendingPromise).toBeUndefined()
+  })
+
+  it('should clear SPA displayPendingPromise when load rejects after match exits', async () => {
+    let rejectLoad!: (err: unknown) => void
+    const loadPromise = new Promise<void>((_resolve, reject) => {
+      rejectLoad = reject
+    })
+    vi.spyOn(mockRouter, 'load').mockReturnValue(loadPromise)
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const matches = mockRouter.matchRoutes(mockRouter.stores.location.get())
+    mockRouter.matchRoutes = vi.fn().mockReturnValue(matches)
+
+    mockWindow.$_TSR = {
+      router: {
+        manifest: testManifest,
+        dehydratedData: {},
+        lastMatchId: '/not-the-current-leaf',
+        matches: [
+          {
+            i: matches[0].id,
+            s: 'success',
+            ssr: true,
+            u: Date.now(),
+          },
+        ],
+      },
+      h: vi.fn(),
+      e: vi.fn(),
+      c: vi.fn(),
+      p: vi.fn(),
+      buffer: [],
+      initialized: false,
+    }
+
+    await hydrate(mockRouter)
+    await Promise.resolve()
+
+    const match = mockRouter.stores.matches.get()[1] as AnyRouteMatch
+    const displayPendingPromise = match._nonReactive.displayPendingPromise
+
+    expect(match._displayPending).toBe(true)
+    expect(displayPendingPromise).toBeDefined()
+
+    mockRouter.stores.setMatches([mockRouter.stores.matches.get()[0]!])
+    rejectLoad(new Error('load failed'))
+    await displayPendingPromise
+    await Promise.resolve()
+
+    expect(match._nonReactive.displayPendingPromise).toBeUndefined()
+    expect(consoleSpy).toHaveBeenCalledWith(
+      'Error during router hydration:',
+      expect.any(Error),
+    )
+
+    consoleSpy.mockRestore()
+  })
+
+  it('should clear current SPA displayPendingPromise when load rejects', async () => {
+    let rejectLoad!: (err: unknown) => void
+    const loadPromise = new Promise<void>((_resolve, reject) => {
+      rejectLoad = reject
+    })
+    vi.spyOn(mockRouter, 'load').mockReturnValue(loadPromise)
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const matches = mockRouter.matchRoutes(mockRouter.stores.location.get())
+    mockRouter.matchRoutes = vi.fn().mockReturnValue(matches)
+
+    mockWindow.$_TSR = {
+      router: {
+        manifest: testManifest,
+        dehydratedData: {},
+        lastMatchId: '/not-the-current-leaf',
+        matches: [
+          {
+            i: matches[0].id,
+            s: 'success',
+            ssr: true,
+            u: Date.now(),
+          },
+        ],
+      },
+      h: vi.fn(),
+      e: vi.fn(),
+      c: vi.fn(),
+      p: vi.fn(),
+      buffer: [],
+      initialized: false,
+    }
+
+    await hydrate(mockRouter)
+    await Promise.resolve()
+
+    const match = mockRouter.stores.matches.get()[1] as AnyRouteMatch
+    const displayPendingPromise = match._nonReactive.displayPendingPromise
+
+    expect(match._displayPending).toBe(true)
+    expect(displayPendingPromise).toBeDefined()
+
+    rejectLoad(new Error('load failed'))
+    await displayPendingPromise
+    await Promise.resolve()
+
+    const updatedMatch = mockRouter.getMatch(match.id) as AnyRouteMatch
+    expect(updatedMatch._displayPending).toBeUndefined()
+    expect(updatedMatch._nonReactive.displayPendingPromise).toBeUndefined()
+    expect(consoleSpy).toHaveBeenCalledWith(
+      'Error during router hydration:',
+      expect.any(Error),
+    )
+
+    consoleSpy.mockRestore()
+  })
 })

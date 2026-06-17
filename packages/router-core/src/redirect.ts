@@ -1,3 +1,4 @@
+import { isServer } from '@tanstack/router-core/isServer'
 import type { NavigateOptions } from './link'
 import type { AnyRouter, RegisteredRouter } from './router'
 import type { ParsedLocation } from './location'
@@ -134,14 +135,12 @@ export function redirect<
     } catch {}
   }
 
-  const headers = new Headers(opts.headers)
-  if (opts.href && headers.get('Location') === null) {
-    headers.set('Location', opts.href)
-  }
-
   const response = new Response(null, {
     status: opts.statusCode,
-    headers,
+    headers:
+      (isServer ?? typeof document === 'undefined') && opts.href
+        ? getRedirectHeaders(opts)
+        : opts.headers,
   })
 
   ;(response as Redirect<TRouter, TFrom, TTo, TMaskFrom, TMaskTo>).options =
@@ -152,6 +151,14 @@ export function redirect<
   }
 
   return response as Redirect<TRouter, TFrom, TTo, TMaskFrom, TMaskTo>
+}
+
+function getRedirectHeaders(opts: { href?: string; headers?: HeadersInit }) {
+  const headers = new Headers(opts.headers)
+  if (headers.get('Location') === null) {
+    headers.set('Location', opts.href!)
+  }
+  return headers
 }
 
 /** Check whether a value is a TanStack Router redirect Response. */
@@ -175,5 +182,5 @@ export function parseRedirect(obj: any) {
     return redirect(obj)
   }
 
-  return undefined
+  return
 }

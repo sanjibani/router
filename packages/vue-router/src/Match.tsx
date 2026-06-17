@@ -4,7 +4,6 @@ import {
   getLocationChangeInfo,
   invariant,
   isNotFound,
-  isRedirect,
   rootRouteId,
 } from '@tanstack/router-core'
 import { isServer } from '@tanstack/router-core/isServer'
@@ -349,22 +348,6 @@ export const MatchInner = Vue.defineComponent({
     const match = Vue.computed(() => combinedState.value?.match)
     const remountKey = Vue.computed(() => combinedState.value?.remountKey)
 
-    const getMatchPromise = (
-      match: {
-        id: string
-        _nonReactive: {
-          displayPendingPromise?: Promise<void>
-          minPendingPromise?: Promise<void>
-          loadPromise?: Promise<void>
-        }
-      },
-      key: 'displayPendingPromise' | 'minPendingPromise' | 'loadPromise',
-    ) => {
-      return (
-        router.getMatch(match.id)?._nonReactive[key] ?? match._nonReactive[key]
-      )
-    }
-
     return (): VNode | null => {
       // If match doesn't exist, return null (component is being unmounted or not ready)
       if (!combinedState.value || !match.value || !route.value) return null
@@ -395,17 +378,6 @@ export const MatchInner = Vue.defineComponent({
           invariant()
         }
         return renderRouteNotFound(router, route.value, match.value.error)
-      }
-
-      if (match.value.status === 'redirected') {
-        if (!isRedirect(match.value.error)) {
-          if (process.env.NODE_ENV !== 'production') {
-            throw new Error('Invariant failed: Expected a redirect error')
-          }
-
-          invariant()
-        }
-        throw getMatchPromise(match.value, 'loadPromise')
       }
 
       if (match.value.status === 'error') {

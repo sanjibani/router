@@ -3,12 +3,13 @@ import { createMemoryHistory } from '@tanstack/history'
 import {
   BaseRootRoute,
   BaseRoute,
+  createControlledPromise,
   notFound,
   redirect,
   rootRouteId,
 } from '../src'
 import { createTestRouter } from './routerTestUtils'
-import { loadMatches } from '../src/load-matches'
+import { loadMatches, loadRouteChunk } from '../src/load-matches'
 import type {
   AnyRouter,
   LoaderStaleReloadMode,
@@ -20,9 +21,10 @@ type AnyRouteOptions = RootRouteOptions<any>
 type BeforeLoad = NonNullable<AnyRouteOptions['beforeLoad']>
 type Loader = NonNullable<AnyRouteOptions['loader']>
 type LoaderEntry = Exclude<Loader, Function>
+type LoaderFn = Exclude<Loader, LoaderEntry>
 
 describe('redirect resolution', () => {
-  test('resolveRedirect normalizes same-origin Location to path-only', async () => {
+  test('resolveRedirect normalizes same-origin Location to path-only on the server', async () => {
     const rootRoute = new BaseRootRoute({})
     const fooRoute = new BaseRoute({
       getParentRoute: () => rootRoute,
@@ -37,6 +39,7 @@ describe('redirect resolution', () => {
         initialEntries: ['https://example.com/foo'],
       }),
       origin: 'https://example.com',
+      isServer: true,
     })
 
     // This redirect already includes an absolute Location header (external-ish),
@@ -50,6 +53,57 @@ describe('redirect resolution', () => {
 
     // Expect Location and stored href to be path-only (no origin).
     expect(resolved.headers.get('Location')).toBe('/foo')
+    expect(resolved.options.href).toBe('/foo')
+  })
+
+  test('resolveRedirect does not rewrite Location on the client', async () => {
+    const rootRoute = new BaseRootRoute({})
+    const fooRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/foo',
+    })
+
+    const routeTree = rootRoute.addChildren([fooRoute])
+
+    const router = createTestRouter({
+      routeTree,
+      history: createMemoryHistory({
+        initialEntries: ['https://example.com/foo'],
+      }),
+      origin: 'https://example.com',
+      isServer: false,
+    })
+
+    const unresolved = redirect({
+      to: '/foo',
+      headers: { Location: 'https://example.com/foo' },
+    })
+
+    const resolved = router.resolveRedirect(unresolved)
+
+    expect(resolved.headers.get('Location')).toBe('https://example.com/foo')
+    expect(resolved.options.href).toBe('/foo')
+  })
+
+  test('resolveRedirect does not add Location on the client', async () => {
+    const rootRoute = new BaseRootRoute({})
+    const fooRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/foo',
+    })
+
+    const routeTree = rootRoute.addChildren([fooRoute])
+
+    const router = createTestRouter({
+      routeTree,
+      history: createMemoryHistory({ initialEntries: ['/foo'] }),
+      isServer: false,
+    })
+
+    const unresolved = redirect({ to: '/foo' })
+    const resolved = router.resolveRedirect(unresolved)
+
+    expect(resolved.headers.get('Location')).toBe(null)
     expect(resolved.options.href).toBe('/foo')
   })
 
@@ -209,6 +263,100 @@ describe('beforeLoad skip or exec', () => {
     expect(thrown).toEqual({ type: 'domain-error' })
   })
 
+  test.each([false, true])(
+    'handles %s async returned redirects from beforeLoad',
+    async (asyncReturn) => {
+      const beforeLoad = vi.fn<BeforeLoad>(() => {
+        const result = redirect({ to: '/bar' })
+        return asyncReturn ? Promise.resolve(result) : result
+      })
+      const router = setup({ beforeLoad })
+
+      await router.navigate({ to: '/foo' })
+
+      expect(router.state.location.pathname).toBe('/bar')
+      expect(beforeLoad).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  test.each([false, true])(
+    'handles %s async returned notFounds from beforeLoad',
+    async (asyncReturn) => {
+      const loader = vi.fn()
+      const rootRoute = new BaseRootRoute({})
+      const fooRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/foo',
+        beforeLoad: () => {
+          const result = notFound()
+          return asyncReturn ? Promise.resolve(result) : result
+        },
+        loader,
+        notFoundComponent: () => null,
+      })
+
+      const routeTree = rootRoute.addChildren([fooRoute])
+      const router = createTestRouter({
+        routeTree,
+        history: createMemoryHistory(),
+      })
+
+      await router.navigate({ to: '/foo' })
+
+      const match = router.state.matches.find((m) => m.routeId === fooRoute.id)
+      expect(match?.status).toBe('notFound')
+      expect(router.state.statusCode).toBe(404)
+      expect(loader).not.toHaveBeenCalled()
+    },
+  )
+
+  test.each([false, true])(
+    'exec if %s async returned preload redirect from beforeLoad',
+    async (asyncReturn) => {
+      const beforeLoad = vi.fn<BeforeLoad>(({ preload }) => {
+        if (preload) {
+          const result = redirect({ to: '/bar' })
+          return asyncReturn ? Promise.resolve(result) : result
+        }
+        return undefined
+      })
+      const router = setup({ beforeLoad })
+
+      await router.preloadRoute({ to: '/foo' })
+      expect(
+        router.stores.cachedMatches.get().some((d) => d.id === '/foo/foo'),
+      ).toBe(false)
+
+      await router.navigate({ to: '/foo' })
+
+      expect(router.state.location.pathname).toBe('/foo')
+      expect(beforeLoad).toHaveBeenCalledTimes(2)
+    },
+  )
+
+  test.each([false, true])(
+    'exec if %s async returned preload notFound from beforeLoad',
+    async (asyncReturn) => {
+      const beforeLoad = vi.fn<BeforeLoad>(({ preload }) => {
+        if (preload) {
+          const result = notFound()
+          return asyncReturn ? Promise.resolve(result) : result
+        }
+        return undefined
+      })
+      const router = setup({ beforeLoad })
+
+      await router.preloadRoute({ to: '/foo' })
+      expect(
+        router.stores.cachedMatches.get().some((d) => d.id === '/foo/foo'),
+      ).toBe(false)
+      await router.navigate({ to: '/foo' })
+
+      expect(router.state.location.pathname).toBe('/foo')
+      expect(beforeLoad).toHaveBeenCalledTimes(2)
+    },
+  )
+
   test('exec if resolved preload (success)', async () => {
     const beforeLoad = vi.fn()
     const router = setup({ beforeLoad })
@@ -275,14 +423,14 @@ describe('beforeLoad skip or exec', () => {
     })
     await router.preloadRoute({ to: '/foo' })
     expect(
-      router.stores.cachedMatches.get().some((d) => d.status === 'redirected'),
+      router.stores.cachedMatches.get().some((d) => d.id === '/foo/foo'),
     ).toBe(false)
     await sleep(10)
     await router.navigate({ to: '/foo' })
 
     expect(router.state.location.pathname).toBe('/foo')
     expect(
-      router.stores.cachedMatches.get().some((d) => d.status === 'redirected'),
+      router.stores.cachedMatches.get().some((d) => d.id === '/foo/foo'),
     ).toBe(false)
     expect(beforeLoad).toHaveBeenCalledTimes(2)
   })
@@ -297,14 +445,11 @@ describe('beforeLoad skip or exec', () => {
     })
     router.preloadRoute({ to: '/foo' })
     await Promise.resolve()
-    expect(
-      router.stores.cachedMatches.get().some((d) => d.status === 'redirected'),
-    ).toBe(false)
     await router.navigate({ to: '/foo' })
 
     expect(router.state.location.pathname).toBe('/foo')
     expect(
-      router.stores.cachedMatches.get().some((d) => d.status === 'redirected'),
+      router.stores.cachedMatches.get().some((d) => d.id === '/foo/foo'),
     ).toBe(false)
     expect(beforeLoad).toHaveBeenCalledTimes(2)
   })
@@ -357,6 +502,74 @@ describe('beforeLoad skip or exec', () => {
     expect(childBeforeLoad).not.toHaveBeenCalled()
     expect(parentHead).toHaveBeenCalledTimes(1)
     expect(childHead).not.toHaveBeenCalled()
+  })
+
+  test('preload descendant waits for active parent beforeLoad context', async () => {
+    const parentBeforeLoadPromise = createControlledPromise<{ auth: string }>()
+    const parentBeforeLoad = vi.fn<BeforeLoad>(() => parentBeforeLoadPromise)
+    const childLoader = vi.fn<LoaderFn>(({ context }) => context)
+
+    const rootRoute = new BaseRootRoute({})
+    const parentRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/parent',
+      beforeLoad: parentBeforeLoad,
+    })
+    const childRoute = new BaseRoute({
+      getParentRoute: () => parentRoute,
+      path: '/child',
+      loader: childLoader,
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([parentRoute.addChildren([childRoute])]),
+      history: createMemoryHistory(),
+    })
+
+    const navigation = router.navigate({ to: '/parent' })
+    await Promise.resolve()
+    expect(parentBeforeLoad).toHaveBeenCalledTimes(1)
+
+    const preload = router.preloadRoute({ to: '/parent/child' })
+    await Promise.resolve()
+    expect(childLoader).not.toHaveBeenCalled()
+
+    parentBeforeLoadPromise.resolve({ auth: 'ok' })
+    await navigation
+    await preload
+
+    expect(childLoader).toHaveBeenCalledTimes(1)
+    expect(childLoader.mock.calls[0]?.[0].context).toMatchObject({
+      auth: 'ok',
+    })
+  })
+
+  test('executes head when loader throws notFound during preload', async () => {
+    const loader = vi.fn<LoaderFn>(({ preload }) => {
+      if (preload) {
+        throw notFound()
+      }
+    })
+    const head = vi.fn(() => ({ meta: [{ title: 'Foo' }] }))
+
+    const rootRoute = new BaseRootRoute({})
+    const fooRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/foo',
+      loader,
+      head,
+      notFoundComponent: () => null,
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([fooRoute]),
+      history: createMemoryHistory(),
+    })
+
+    await router.preloadRoute({ to: '/foo' })
+
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(head).toHaveBeenCalledTimes(1)
   })
 
   test('exec if pending preload (error)', async () => {
@@ -441,6 +654,87 @@ describe('loader skip or exec', () => {
     expect(loader).toHaveBeenCalledTimes(1)
   })
 
+  test.each([false, true])(
+    'handles %s async returned redirects from loader',
+    async (asyncReturn) => {
+      const loader = vi.fn<LoaderFn>(() => {
+        const result = redirect({ to: '/bar' })
+        return asyncReturn ? Promise.resolve(result) : result
+      })
+      const router = setup({ loader })
+
+      await router.navigate({ to: '/foo' })
+
+      expect(router.state.location.pathname).toBe('/bar')
+      expect(loader).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  test.each([false, true])(
+    'handles %s async returned notFounds from loader',
+    async (asyncReturn) => {
+      const rootRoute = new BaseRootRoute({})
+      const fooRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/foo',
+        loader: () => {
+          const result = notFound()
+          return asyncReturn ? Promise.resolve(result) : result
+        },
+        notFoundComponent: () => null,
+      })
+
+      const routeTree = rootRoute.addChildren([fooRoute])
+      const router = createTestRouter({
+        routeTree,
+        history: createMemoryHistory(),
+      })
+
+      await router.navigate({ to: '/foo' })
+
+      const match = router.state.matches.find((m) => m.routeId === fooRoute.id)
+      expect(match?.status).toBe('notFound')
+      expect(router.state.statusCode).toBe(404)
+    },
+  )
+
+  test('settles descendant match when notFound renders an ancestor boundary', async () => {
+    const rootRoute = new BaseRootRoute({})
+    const parentRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/parent',
+      notFoundComponent: () => null,
+    })
+    const childRoute = new BaseRoute({
+      getParentRoute: () => parentRoute,
+      path: '/child',
+      loader: () => notFound({ routeId: parentRoute.id }),
+    })
+
+    const routeTree = rootRoute.addChildren([
+      parentRoute.addChildren([childRoute]),
+    ])
+    const router = createTestRouter({
+      routeTree,
+      history: createMemoryHistory(),
+    })
+
+    await router.navigate({ to: '/parent/child' })
+
+    const parentMatch = router.state.matches.find(
+      (m) => m.routeId === parentRoute.id,
+    )
+    const childMatch = router.state.matches.find(
+      (m) => m.routeId === childRoute.id,
+    )
+    expect(parentMatch?.status).toBe('notFound')
+    expect(childMatch).toMatchObject({
+      status: 'notFound',
+      isFetching: false,
+      error: expect.objectContaining({ isNotFound: true }),
+    })
+  })
+
   test('exec if resolved preload (success)', async () => {
     const loader = vi.fn()
     const router = setup({ loader })
@@ -520,14 +814,14 @@ describe('loader skip or exec', () => {
     })
     await router.preloadRoute({ to: '/foo' })
     expect(
-      router.stores.cachedMatches.get().some((d) => d.status === 'redirected'),
+      router.stores.cachedMatches.get().some((d) => d.id === '/foo/foo'),
     ).toBe(false)
     await sleep(10)
     await router.navigate({ to: '/foo' })
 
     expect(router.state.location.pathname).toBe('/foo')
     expect(
-      router.stores.cachedMatches.get().some((d) => d.status === 'redirected'),
+      router.stores.cachedMatches.get().some((d) => d.id === '/foo/foo'),
     ).toBe(false)
     expect(loader).toHaveBeenCalledTimes(2)
   })
@@ -542,19 +836,87 @@ describe('loader skip or exec', () => {
     })
     router.preloadRoute({ to: '/foo' })
     await Promise.resolve()
-    expect(
-      router.stores.cachedMatches.get().some((d) => d.status === 'redirected'),
-    ).toBe(false)
     await router.navigate({ to: '/foo' })
 
     expect(router.state.location.pathname).toBe('/bar')
     expect(
-      router.stores.cachedMatches.get().some((d) => d.status === 'redirected'),
+      router.stores.cachedMatches.get().some((d) => d.id === '/foo/foo'),
     ).toBe(false)
     expect(loader).toHaveBeenCalledTimes(1)
   })
 
-  test('updateMatch removes redirected matches from cachedMatches', async () => {
+  test('keeps active pending match renderable when an older preload redirects', async () => {
+    vi.useFakeTimers()
+
+    try {
+      let rejectFoo!: (error: unknown) => void
+      let resolveBar!: () => void
+      const rootRoute = new BaseRootRoute({})
+      const indexRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/',
+      })
+      const fooRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/foo',
+        pendingMs: 1,
+        pendingComponent: {},
+        loader: () =>
+          new Promise((_resolve, reject) => {
+            rejectFoo = reject
+          }),
+      })
+      const barRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/bar',
+        loader: () =>
+          new Promise<void>((resolve) => {
+            resolveBar = resolve
+          }),
+      })
+      const router = createTestRouter({
+        routeTree: rootRoute.addChildren([indexRoute, fooRoute, barRoute]),
+        history: createMemoryHistory({ initialEntries: ['/'] }),
+      })
+
+      await router.load()
+
+      const preload = router.preloadRoute({ to: '/foo' })
+      await vi.waitFor(() => expect(rejectFoo).toBeTypeOf('function'))
+
+      const navigation = router.navigate({ to: '/foo' })
+      await vi.advanceTimersByTimeAsync(1)
+      await vi.waitFor(() =>
+        expect(
+          router.state.matches.some(
+            (match) => match.id === '/foo/foo' && match.status === 'pending',
+          ),
+        ).toBe(true),
+      )
+
+      rejectFoo(redirect({ to: '/bar' }))
+      await vi.waitFor(() =>
+        expect(
+          router.stores.pendingMatches
+            .get()
+            .some((match) => match.id === '/bar/bar'),
+        ).toBe(true),
+      )
+
+      expect(
+        router.state.matches.find((match) => match.id === '/foo/foo')?.status,
+      ).toBe('pending')
+
+      resolveBar()
+      await Promise.all([preload, navigation])
+
+      expect(router.state.location.pathname).toBe('/bar')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('updateMatch removes failed matches from cachedMatches', async () => {
     const loader = vi.fn()
     const router = setup({ loader })
 
@@ -565,14 +927,12 @@ describe('loader skip or exec', () => {
 
     router.updateMatch('/foo/foo', (prev) => ({
       ...prev,
-      status: 'redirected',
+      status: 'error',
+      error: new Error('boom'),
     }))
 
     expect(
       router.stores.cachedMatches.get().some((d) => d.id === '/foo/foo'),
-    ).toBe(false)
-    expect(
-      router.stores.cachedMatches.get().some((d) => d.status === 'redirected'),
     ).toBe(false)
   })
 
@@ -738,7 +1098,12 @@ describe('stale loader reload triggers', () => {
       path: '/bar',
     })
 
-    const routeTree = rootRoute.addChildren([fooRoute, barRoute])
+    const bazRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/baz',
+    })
+
+    const routeTree = rootRoute.addChildren([fooRoute, barRoute, bazRoute])
 
     return createTestRouter({
       routeTree,
@@ -1152,6 +1517,133 @@ describe('stale loader reload triggers', () => {
       resolveStaleReload,
     )
   })
+
+  test('settles promises and drops cache entry when a background stale reload redirects', async () => {
+    let rejectStaleReload!: (error: unknown) => void
+    let loaderCalls = 0
+    const loader = vi.fn(() => {
+      loaderCalls += 1
+      if (loaderCalls === 1) {
+        return { value: 'first' }
+      }
+
+      return new Promise((_resolve, reject) => {
+        rejectStaleReload = reject
+      })
+    })
+    const router = setup({ loader, staleTime: 0 })
+
+    await router.navigate({ to: '/foo' })
+    expect(loader).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1)
+    await router.load()
+    await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(2))
+
+    const fooMatch = getMatchById(router, '/foo/foo')!
+    const backgroundLoaderPromise = fooMatch._nonReactive.loaderPromise
+    const backgroundLoadPromise = fooMatch._nonReactive.loadPromise
+
+    expect(backgroundLoaderPromise?.status).toBe('pending')
+    expect(backgroundLoadPromise?.status).toBe('pending')
+
+    rejectStaleReload(redirect({ to: '/bar' }))
+    await backgroundLoaderPromise
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe('/bar'))
+
+    expect(backgroundLoadPromise?.status).toBe('resolved')
+    expect(fooMatch._nonReactive.loaderPromise).toBeUndefined()
+    expect(fooMatch._nonReactive.loadPromise).toBeUndefined()
+    expect(
+      router.stores.cachedMatches
+        .get()
+        .some((match) => match.id === '/foo/foo'),
+    ).toBe(false)
+  })
+
+  test('settles promises and drops cache entry when a cached background stale reload redirects', async () => {
+    let rejectStaleReload!: (error: unknown) => void
+    let loaderCalls = 0
+    const loader = vi.fn(() => {
+      loaderCalls += 1
+      if (loaderCalls === 1) {
+        return { value: 'first' }
+      }
+
+      return new Promise((_resolve, reject) => {
+        rejectStaleReload = reject
+      })
+    })
+    const router = setup({ loader, staleTime: 0 })
+
+    await router.navigate({ to: '/foo' })
+    await vi.advanceTimersByTimeAsync(1)
+    await router.load()
+    await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(2))
+
+    const fooMatch = getMatchById(router, '/foo/foo')!
+    const backgroundLoaderPromise = fooMatch._nonReactive.loaderPromise
+    const backgroundLoadPromise = fooMatch._nonReactive.loadPromise
+
+    expect(backgroundLoaderPromise?.status).toBe('pending')
+    expect(backgroundLoadPromise?.status).toBe('pending')
+
+    await router.navigate({ to: '/bar' })
+    expect(router.state.location.pathname).toBe('/bar')
+    expect(
+      router.stores.cachedMatches
+        .get()
+        .some((match) => match.id === '/foo/foo'),
+    ).toBe(true)
+
+    rejectStaleReload(redirect({ to: '/baz' }))
+    await backgroundLoaderPromise
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe('/baz'))
+    await vi.waitFor(() =>
+      expect(
+        router.stores.cachedMatches
+          .get()
+          .some((match) => match.id === '/foo/foo'),
+      ).toBe(false),
+    )
+
+    expect(backgroundLoadPromise?.status).toBe('resolved')
+    expect(fooMatch._nonReactive.loaderPromise).toBeUndefined()
+    expect(fooMatch._nonReactive.loadPromise).toBeUndefined()
+  })
+
+  test('settles promises and drops cache entry when a cached pending preload errors', async () => {
+    let rejectPreload!: (error: unknown) => void
+    const loader = vi.fn(() => {
+      return new Promise((_resolve, reject) => {
+        rejectPreload = reject
+      })
+    })
+    const router = setup({ loader })
+
+    const preload = router.preloadRoute({ to: '/foo' })
+    await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(1))
+
+    const fooMatch = getMatchById(router, '/foo/foo')!
+    const loaderPromise = fooMatch._nonReactive.loaderPromise
+    const loadPromise = fooMatch._nonReactive.loadPromise
+
+    expect(loaderPromise?.status).toBe('pending')
+    expect(loadPromise?.status).toBe('pending')
+
+    rejectPreload(new Error('preload failed'))
+    await preload
+
+    expect(loaderPromise?.status).toBe('resolved')
+    expect(loadPromise?.status).toBe('resolved')
+    expect(fooMatch._nonReactive.loaderPromise).toBeUndefined()
+    expect(fooMatch._nonReactive.loadPromise).toBeUndefined()
+    expect(
+      router.stores.cachedMatches
+        .get()
+        .some((match) => match.id === '/foo/foo'),
+    ).toBe(false)
+  })
 })
 
 test('cancelMatches after pending timeout', async () => {
@@ -1201,6 +1693,272 @@ test('cancelMatches after pending timeout', async () => {
   expect(onAbortMock).toHaveBeenCalled()
   const cancelledFooMatch = router.getMatch('/foo/foo')
   expect(cancelledFooMatch?._nonReactive.pendingTimeout).toBeUndefined()
+})
+
+test('pending timeout clears itself so a later load pass can re-arm it', async () => {
+  vi.useFakeTimers()
+
+  try {
+    const WAIT_TIME = 5
+    let resolveLoader!: () => void
+    const loader = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveLoader = resolve
+        }),
+    )
+
+    const rootRoute = new BaseRootRoute({})
+    const fooRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/foo',
+      pendingMs: WAIT_TIME,
+      loader,
+      pendingComponent: {},
+    })
+    const routeTree = rootRoute.addChildren([fooRoute])
+    const router = createTestRouter({
+      routeTree,
+      history: createMemoryHistory(),
+    })
+
+    await router.load()
+    const navigation = router.navigate({ to: '/foo' })
+    await vi.advanceTimersByTimeAsync(WAIT_TIME * 2)
+
+    const firstPendingMatch = router.getMatch('/foo/foo')
+    expect(firstPendingMatch?._nonReactive.pendingTimeout).toBeUndefined()
+
+    const joinedLoad = router.load()
+    await Promise.resolve()
+
+    const rearmedMatch = router.getMatch('/foo/foo')
+    expect(rearmedMatch?._nonReactive.pendingTimeout).toBeDefined()
+
+    await vi.advanceTimersByTimeAsync(WAIT_TIME * 2)
+    expect(rearmedMatch?._nonReactive.pendingTimeout).toBeUndefined()
+
+    resolveLoader()
+    await Promise.all([navigation, joinedLoad])
+    expect(loader).toHaveBeenCalledTimes(1)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('settles load promise for pending-visible match that redirects after exiting', async () => {
+  vi.useFakeTimers()
+
+  try {
+    let rejectLoader!: (error: unknown) => void
+    const rootRoute = new BaseRootRoute({})
+    const indexRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/',
+    })
+    const fromRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/from',
+      pendingMs: 1,
+      pendingComponent: {},
+      loader: () =>
+        new Promise((_resolve, reject) => {
+          rejectLoader = reject
+        }),
+    })
+    const toRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/to',
+    })
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([indexRoute, fromRoute, toRoute]),
+      history: createMemoryHistory({ initialEntries: ['/'] }),
+    })
+
+    await router.load()
+
+    const navigation = router.navigate({ to: '/from' })
+    await vi.waitFor(() => expect(router.state.status).toBe('pending'))
+    await vi.advanceTimersByTimeAsync(1)
+    await vi.waitFor(() =>
+      expect(
+        router.state.matches.some(
+          (match) => match.id === '/from/from' && match.status === 'pending',
+        ),
+      ).toBe(true),
+    )
+
+    const fromMatch = router.state.matches.find(
+      (match) => match.id === '/from/from',
+    )!
+    const loadPromise = fromMatch._nonReactive.loadPromise
+
+    expect(loadPromise?.status).toBe('pending')
+
+    rejectLoader(redirect({ to: '/to' }))
+    await navigation
+
+    expect(router.state.location.pathname).toBe('/to')
+    expect(loadPromise?.status).toBe('resolved')
+    expect(fromMatch._nonReactive.loadPromise).toBeUndefined()
+    expect(
+      router.stores.cachedMatches
+        .get()
+        .some((match) => match.id === '/from/from'),
+    ).toBe(false)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('ignores late loader resolution after pending-visible match exits', async () => {
+  vi.useFakeTimers()
+
+  try {
+    let resolveLoader!: () => void
+    const rootRoute = new BaseRootRoute({})
+    const indexRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/',
+    })
+    const fromRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/from',
+      pendingMs: 1,
+      pendingComponent: {},
+      loader: () =>
+        new Promise<void>((resolve) => {
+          resolveLoader = resolve
+        }),
+    })
+    const toRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/to',
+    })
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([indexRoute, fromRoute, toRoute]),
+      history: createMemoryHistory({ initialEntries: ['/'] }),
+    })
+
+    await router.load()
+
+    const fromNavigation = router.navigate({ to: '/from' })
+    await vi.waitFor(() => expect(router.state.status).toBe('pending'))
+    await vi.advanceTimersByTimeAsync(1)
+    await vi.waitFor(() =>
+      expect(
+        router.state.matches.some(
+          (match) => match.id === '/from/from' && match.status === 'pending',
+        ),
+      ).toBe(true),
+    )
+
+    const fromMatch = router.state.matches.find(
+      (match) => match.id === '/from/from',
+    )!
+    const minPendingPromise = createControlledPromise<void>()
+    fromMatch._nonReactive.minPendingPromise = minPendingPromise
+    const loaderPromise = fromMatch._nonReactive.loaderPromise
+    const loadPromise = fromMatch._nonReactive.loadPromise
+
+    expect(minPendingPromise.status).toBe('pending')
+    expect(loaderPromise?.status).toBe('pending')
+    expect(loadPromise?.status).toBe('pending')
+
+    await router.navigate({ to: '/to' })
+
+    expect(router.state.location.pathname).toBe('/to')
+    expect(minPendingPromise.status).toBe('resolved')
+    expect(fromMatch._nonReactive.minPendingPromise).toBeUndefined()
+    expect(loaderPromise?.status).toBe('resolved')
+    expect(loadPromise?.status).toBe('resolved')
+    expect(fromMatch._nonReactive.loaderPromise).toBeUndefined()
+    expect(fromMatch._nonReactive.loadPromise).toBeUndefined()
+
+    resolveLoader()
+    await fromNavigation
+
+    expect(router.state.location.pathname).toBe('/to')
+    expect(
+      router.stores.cachedMatches
+        .get()
+        .some((match) => match.id === '/from/from'),
+    ).toBe(false)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('settles promises for pending-visible match whose loader rejects AbortError after exiting', async () => {
+  vi.useFakeTimers()
+
+  try {
+    const rootRoute = new BaseRootRoute({})
+    const indexRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/',
+    })
+    const fromRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/from',
+      pendingMs: 1,
+      pendingComponent: {},
+      loader: ({ abortController }) =>
+        new Promise<void>((_resolve, reject) => {
+          abortController.signal.addEventListener('abort', () => {
+            const abortError = new Error('aborted')
+            abortError.name = 'AbortError'
+            reject(abortError)
+          })
+        }),
+    })
+    const toRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/to',
+    })
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([indexRoute, fromRoute, toRoute]),
+      history: createMemoryHistory({ initialEntries: ['/'] }),
+    })
+
+    await router.load()
+
+    const fromNavigation = router.navigate({ to: '/from' })
+    await vi.waitFor(() => expect(router.state.status).toBe('pending'))
+    await vi.advanceTimersByTimeAsync(1)
+    await vi.waitFor(() =>
+      expect(
+        router.state.matches.some(
+          (match) => match.id === '/from/from' && match.status === 'pending',
+        ),
+      ).toBe(true),
+    )
+
+    const fromMatch = router.state.matches.find(
+      (match) => match.id === '/from/from',
+    )!
+    const loaderPromise = fromMatch._nonReactive.loaderPromise
+    const loadPromise = fromMatch._nonReactive.loadPromise
+
+    expect(loaderPromise?.status).toBe('pending')
+    expect(loadPromise?.status).toBe('pending')
+
+    await router.navigate({ to: '/to' })
+    await fromNavigation
+
+    expect(router.state.location.pathname).toBe('/to')
+    expect(loaderPromise?.status).toBe('resolved')
+    expect(loadPromise?.status).toBe('resolved')
+    expect(fromMatch._nonReactive.loaderPromise).toBeUndefined()
+    expect(fromMatch._nonReactive.loadPromise).toBeUndefined()
+    expect(
+      router.stores.cachedMatches
+        .get()
+        .some((match) => match.id === '/from/from'),
+    ).toBe(false)
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 describe('head execution', () => {
@@ -1415,6 +2173,46 @@ describe('head execution', () => {
     // SSR produces valid <head> content (e.g. charset, viewport, stylesheets).
     expect(rootHead).toHaveBeenCalledTimes(1)
     expect(childHead).toHaveBeenCalledTimes(1)
+  })
+
+  test('clears force pending when beforeLoad throws non-notFound error', async () => {
+    const beforeLoadError = new Error('beforeLoad-sync-error')
+    const rootRoute = new BaseRootRoute({})
+
+    const childRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/test',
+      beforeLoad: () => {
+        throw beforeLoadError
+      },
+    })
+
+    const routeTree = rootRoute.addChildren([childRoute])
+    const router = createTestRouter({
+      routeTree,
+      history: createMemoryHistory({ initialEntries: ['/test'] }),
+    })
+
+    const location = router.latestLocation
+    const matches = router.matchRoutes(location)
+    const childMatch = matches[1]!
+    childMatch._forcePending = true
+    childMatch._nonReactive.minPendingPromise = createControlledPromise()
+    router.stores.setPending(matches)
+
+    await expect(
+      loadMatches({
+        router,
+        location,
+        matches,
+        updateMatch: router.updateMatch,
+      }),
+    ).rejects.toBe(beforeLoadError)
+
+    const updatedMatch = router.getMatch(childMatch.id)
+    expect(updatedMatch?.status).toBe('error')
+    expect(updatedMatch?._forcePending).toBeUndefined()
+    expect(updatedMatch?._nonReactive.minPendingPromise).toBeUndefined()
   })
 
   test('propagates async beforeLoad non-notFound error running ancestor loaders and heads', async () => {
@@ -1916,6 +2714,49 @@ describe('head execution', () => {
       expect(rootMatch?.globalNotFound).toBe(false)
       expect(rootMatch?.error).toBeUndefined()
     })
+
+    test('keeps root globalNotFound from overlapping stale initial load', async () => {
+      const rootRoute = new BaseRootRoute({
+        notFoundComponent: () => null,
+      })
+      const indexRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/',
+      })
+      const postsRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/posts',
+      })
+
+      const router = createTestRouter({
+        routeTree: rootRoute.addChildren([indexRoute, postsRoute]),
+        history: createMemoryHistory({ initialEntries: ['/'] }),
+      })
+
+      const matchResult = router.getMatchedRoutes('/non-existent')
+      expect(matchResult.foundRoute).toBeUndefined()
+      expect(matchResult.matchedRoutes.map((route) => route.id)).toEqual([
+        rootRoute.id,
+      ])
+
+      const initialLoad = router.load()
+      const notFoundNavigation = router.navigate({
+        to: '/non-existent' as never,
+      })
+
+      await Promise.all([initialLoad, notFoundNavigation])
+
+      expect(router.state.location.pathname).toBe('/non-existent')
+      expect(router.state.statusCode).toBe(404)
+      expect(router.state.matches).toHaveLength(1)
+      expect(router.state.matches[0]).toEqual(
+        expect.objectContaining({
+          routeId: rootRoute.id,
+          status: 'success',
+          globalNotFound: true,
+        }),
+      )
+    })
   })
 })
 
@@ -2173,6 +3014,308 @@ describe('routeId in context options', () => {
         routeId: '/_layout',
       }),
     )
+  })
+})
+
+describe('beforeLoad context lifecycle', () => {
+  test('clears stale beforeLoad context when a later run returns undefined', async () => {
+    let returnContext = true
+    const seenContexts: Array<Record<string, unknown>> = []
+
+    const rootRoute = new BaseRootRoute({
+      beforeLoad: () => {
+        return returnContext ? { token: 'one' } : undefined
+      },
+    })
+    const childRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/child',
+      staleTime: 0,
+      loader: ({ context }) => {
+        seenContexts.push(context)
+      },
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([childRoute]),
+      history: createMemoryHistory({ initialEntries: ['/child'] }),
+    })
+
+    await router.load()
+    expect(seenContexts.at(-1)).toMatchObject({ token: 'one' })
+
+    returnContext = false
+    await router.invalidate({ sync: true })
+
+    expect(seenContexts.at(-1)).not.toHaveProperty('token')
+    expect(router.state.matches[0]?.__beforeLoadContext).toBeUndefined()
+  })
+})
+
+describe('loadRouteChunk', () => {
+  test('partial notFoundComponent preload does not mark all components loaded', async () => {
+    const componentPreload = vi.fn()
+    const errorPreload = vi.fn()
+    const notFoundPreload = vi.fn()
+    const rootRoute = new BaseRootRoute({})
+    const route = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/chunked',
+      component: { preload: componentPreload } as any,
+      errorComponent: { preload: errorPreload } as any,
+      notFoundComponent: { preload: notFoundPreload } as any,
+    })
+
+    await loadRouteChunk(route, ['notFoundComponent'])
+
+    expect(notFoundPreload).toHaveBeenCalledTimes(1)
+    expect(componentPreload).not.toHaveBeenCalled()
+    expect(errorPreload).not.toHaveBeenCalled()
+    expect((route as any)._componentsLoaded).not.toBe(true)
+
+    await loadRouteChunk(route)
+
+    expect(componentPreload).toHaveBeenCalledTimes(1)
+    expect(errorPreload).toHaveBeenCalledTimes(1)
+    expect(notFoundPreload).toHaveBeenCalledTimes(2)
+    expect((route as any)._componentsLoaded).toBe(true)
+
+    await loadRouteChunk(route)
+
+    expect(componentPreload).toHaveBeenCalledTimes(1)
+    expect(errorPreload).toHaveBeenCalledTimes(1)
+    expect(notFoundPreload).toHaveBeenCalledTimes(2)
+  })
+
+  test('dedupes concurrent full component preloads', async () => {
+    let resolveComponent!: () => void
+    const componentPreload = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveComponent = resolve
+        }),
+    )
+    const rootRoute = new BaseRootRoute({})
+    const route = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/chunked',
+      component: { preload: componentPreload } as any,
+    })
+
+    const first = loadRouteChunk(route)
+    const second = loadRouteChunk(route)
+
+    expect(componentPreload).toHaveBeenCalledTimes(1)
+
+    resolveComponent()
+    await Promise.all([first, second])
+
+    expect((route as any)._componentsLoaded).toBe(true)
+
+    await loadRouteChunk(route)
+
+    expect(componentPreload).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('settle errors do not leak across load generations', () => {
+  test('clearCache settles promises for evicted cached matches', async () => {
+    const rootRoute = new BaseRootRoute({})
+    const cachedRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/cached',
+      loader: () => undefined,
+    })
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([cachedRoute]),
+      history: createMemoryHistory(),
+    })
+    await router.load()
+    await router.preloadRoute({ to: '/cached' })
+
+    const match = router.stores.cachedMatches.get()[0]!
+    const beforeLoadPromise = createControlledPromise<void>()
+    const loaderPromise = createControlledPromise<void>()
+    const loadPromise = createControlledPromise<void>()
+    const minPendingPromise = createControlledPromise<void>()
+
+    match._nonReactive.beforeLoadPromise = beforeLoadPromise
+    match._nonReactive.loaderPromise = loaderPromise
+    match._nonReactive.loadPromise = loadPromise
+    match._nonReactive.minPendingPromise = minPendingPromise
+
+    router.clearCache()
+
+    expect(router.stores.cachedMatches.get()).toEqual([])
+    expect(beforeLoadPromise.status).toBe('resolved')
+    expect(loaderPromise.status).toBe('resolved')
+    expect(loadPromise.status).toBe('resolved')
+    expect(minPendingPromise.status).toBe('resolved')
+  })
+
+  test('a stale redirect resolving after a newer navigation does not navigate or update redirect state', async () => {
+    const slowBeforeLoadStarted = vi.fn()
+    const slowBeforeLoadGate = createControlledPromise<void>()
+
+    const rootRoute = new BaseRootRoute({})
+    const indexRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/',
+    })
+    const slowRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/slow',
+      beforeLoad: async () => {
+        slowBeforeLoadStarted()
+        await slowBeforeLoadGate
+        throw redirect({ to: '/redirected' })
+      },
+    })
+    const safeRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/safe',
+    })
+    const redirectedRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/redirected',
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([
+        indexRoute,
+        slowRoute,
+        safeRoute,
+        redirectedRoute,
+      ]),
+      history: createMemoryHistory({ initialEntries: ['/'] }),
+    })
+    await router.load()
+
+    const staleNavigation = router.navigate({ to: '/slow' })
+    await vi.waitFor(() => expect(slowBeforeLoadStarted).toHaveBeenCalled())
+
+    await router.navigate({ to: '/safe' })
+    expect(router.state.location.pathname).toBe('/safe')
+
+    slowBeforeLoadGate.resolve()
+    await staleNavigation
+
+    expect(router.state.location.pathname).toBe('/safe')
+    expect(router.state.redirect).toBeUndefined()
+  })
+
+  test('a notFound stored by a previous preload is not replayed onto a load pass that joins a newer in-flight load', async () => {
+    let loaderCalls = 0
+    let releaseLoader!: () => void
+    const loaderGate = new Promise<void>((resolve) => {
+      releaseLoader = resolve
+    })
+
+    const loader = vi.fn(async () => {
+      loaderCalls++
+      if (loaderCalls === 1) {
+        // the preload generation settles with notFound
+        throw notFound()
+      }
+      // the navigation generation succeeds, but slowly
+      await loaderGate
+      return { value: 'fresh' }
+    })
+
+    const rootRoute = new BaseRootRoute({})
+    const staleRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/stale',
+      loader,
+      staleTime: 0,
+      gcTime: 60_000,
+    })
+    const routeTree = rootRoute.addChildren([staleRoute])
+    const router = createTestRouter({
+      routeTree,
+      history: createMemoryHistory(),
+    })
+    await router.load()
+
+    // generation 1: the preload stores the notFound settle error on the
+    // cached match
+    await router.preloadRoute({ to: '/stale' })
+    expect(loader).toHaveBeenCalledTimes(1)
+
+    // generation 2: navigating reuses the cached match and starts the slow
+    // loader
+    const navigatePromise = router.navigate({ to: '/stale' })
+    await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(2))
+
+    // generation 3: a load pass joins the in-flight generation 2 loader.
+    // It must observe generation 2's result, not the stale notFound settle
+    // error stored by generation 1.
+    const joinPromise = router.load()
+    await sleep(5)
+
+    releaseLoader()
+    await Promise.all([navigatePromise, joinPromise])
+
+    const match = router.state.matches.find((m) => m.routeId === staleRoute.id)!
+    expect(match.status).toBe('success')
+    expect(match.loaderData).toEqual({ value: 'fresh' })
+  })
+
+  test('a redirect stored by a previous preload is not replayed onto a load pass that joins a newer in-flight load', async () => {
+    let loaderCalls = 0
+    let releaseLoader!: () => void
+    const loaderGate = new Promise<void>((resolve) => {
+      releaseLoader = resolve
+    })
+
+    const loader = vi.fn(async () => {
+      loaderCalls++
+      if (loaderCalls === 1) {
+        throw redirect({ to: '/other' })
+      }
+      await loaderGate
+      return { value: 'fresh' }
+    })
+
+    const rootRoute = new BaseRootRoute({})
+    const staleRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/stale',
+      loader,
+      staleTime: 0,
+      gcTime: 60_000,
+    })
+    const otherRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/other',
+    })
+    const routeTree = rootRoute.addChildren([staleRoute, otherRoute])
+    const router = createTestRouter({
+      routeTree,
+      history: createMemoryHistory(),
+    })
+    await router.load()
+
+    await router.preloadRoute({ to: '/stale' })
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(
+      router.stores.cachedMatches
+        .get()
+        .some((match) => match.id === '/stale/stale'),
+    ).toBe(false)
+
+    const navigatePromise = router.navigate({ to: '/stale' })
+    await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(2))
+    const joinPromise = router.load()
+    await sleep(5)
+
+    releaseLoader()
+    await Promise.all([navigatePromise, joinPromise])
+
+    expect(router.state.location.pathname).toBe('/stale')
+    const match = router.state.matches.find((m) => m.routeId === staleRoute.id)!
+    expect(match.status).toBe('success')
+    expect(match.loaderData).toEqual({ value: 'fresh' })
   })
 })
 

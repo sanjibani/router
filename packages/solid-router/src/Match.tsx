@@ -4,7 +4,6 @@ import {
   getLocationChangeInfo,
   invariant,
   isNotFound,
-  isRedirect,
   rootRouteId,
 } from '@tanstack/router-core'
 import { isServer } from '@tanstack/router-core/isServer'
@@ -279,22 +278,6 @@ export const MatchInner = (): any => {
           return <Outlet />
         }
 
-        const getLoadPromise = (
-          matchId: string,
-          fallbackMatch:
-            | {
-                _nonReactive: {
-                  loadPromise?: Promise<void>
-                }
-              }
-            | undefined,
-        ) => {
-          return (
-            router.getMatch(matchId)?._nonReactive.loadPromise ??
-            fallbackMatch?._nonReactive.loadPromise
-          )
-        }
-
         const keyedOut = () => (
           <Solid.Show when={componentKey()} keyed>
             {(_key) => out()}
@@ -395,29 +378,6 @@ export const MatchInner = (): any => {
                 )
               }}
             </Solid.Match>
-            <Solid.Match when={currentMatch().status === 'redirected'}>
-              {(_) => {
-                const matchId = currentMatch().id
-                const routerMatch = router.getMatch(matchId)
-
-                if (!isRedirect(currentMatch().error)) {
-                  if (process.env.NODE_ENV !== 'production') {
-                    throw new Error(
-                      'Invariant failed: Expected a redirect error',
-                    )
-                  }
-
-                  invariant()
-                }
-
-                const [loaderResult] = Solid.createResource(async () => {
-                  await Promise.resolve()
-                  return getLoadPromise(matchId, routerMatch)
-                })
-
-                return <>{loaderResult()}</>
-              }}
-            </Solid.Match>
             <Solid.Match when={currentMatch().status === 'error'}>
               {(_) => {
                 if (isServer ?? router.isServer) {
@@ -469,14 +429,7 @@ export const Outlet = () => {
       : undefined
   })
 
-  const childMatchStatus = Solid.createMemo(() => {
-    const id = childMatchId()
-    if (!id) return undefined
-    return router.stores.matchStores.get(id)?.get().status
-  })
-
-  const shouldShowNotFound = () =>
-    childMatchStatus() !== 'redirected' && parentGlobalNotFound()
+  const shouldShowNotFound = () => parentGlobalNotFound()
 
   const childRouteKey = Solid.createMemo(() => {
     if (shouldShowNotFound()) return undefined

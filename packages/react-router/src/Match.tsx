@@ -7,7 +7,6 @@ import {
   getLocationChangeInfo,
   invariant,
   isNotFound,
-  isRedirect,
   rootRouteId,
 } from '@tanstack/router-core'
 import { isServer } from '@tanstack/router-core/isServer'
@@ -306,7 +305,9 @@ export const MatchInner = React.memo(function MatchInnerImpl({
     key: 'displayPendingPromise' | 'minPendingPromise' | 'loadPromise',
   ) => {
     return (
-      router.getMatch(match.id)?._nonReactive[key] ?? match._nonReactive[key]
+      router.getMatch(match.id)?._nonReactive[key] ??
+      match._nonReactive[key] ??
+      router.latestLoadPromise
     )
   }
 
@@ -358,17 +359,6 @@ export const MatchInner = React.memo(function MatchInnerImpl({
         invariant()
       }
       return renderRouteNotFound(router, route, match.error)
-    }
-
-    if (match.status === 'redirected') {
-      if (!isRedirect(match.error)) {
-        if (process.env.NODE_ENV !== 'production') {
-          throw new Error('Invariant failed: Expected a redirect error')
-        }
-
-        invariant()
-      }
-      throw getMatchPromise(match, 'loadPromise')
     }
 
     if (match.status === 'error') {
@@ -476,22 +466,6 @@ export const MatchInner = React.memo(function MatchInnerImpl({
       invariant()
     }
     return renderRouteNotFound(router, route, match.error)
-  }
-
-  if (match.status === 'redirected') {
-    // A match can be observed as redirected during an in-flight transition,
-    // especially when pending UI is already rendering. Suspend on the match's
-    // load promise so React can abandon this stale render and continue the
-    // redirect transition.
-    if (!isRedirect(match.error)) {
-      if (process.env.NODE_ENV !== 'production') {
-        throw new Error('Invariant failed: Expected a redirect error')
-      }
-
-      invariant()
-    }
-
-    throw getMatchPromise(match, 'loadPromise')
   }
 
   if (match.status === 'error') {

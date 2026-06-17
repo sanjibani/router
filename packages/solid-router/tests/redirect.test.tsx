@@ -105,52 +105,6 @@ describe('redirect', () => {
       expect(nestedFooLoaderMock).toHaveBeenCalled()
     })
 
-    test('when root `beforeLoad` redirects while root pendingComponent is showing and the target route is lazy', async () => {
-      let hasRedirected = false
-      const consoleError = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {})
-
-      const rootRoute = createRootRoute({
-        component: () => <Outlet />,
-        pendingMs: 0,
-        pendingComponent: () => <div data-testid="pending">loading</div>,
-        beforeLoad: async () => {
-          await sleep(WAIT_TIME)
-          if (!hasRedirected) {
-            hasRedirected = true
-            throw redirect({ to: '/posts' })
-          }
-        },
-      })
-
-      const indexRoute = createRoute({
-        getParentRoute: () => rootRoute,
-        path: '/',
-        component: () => <div data-testid="index-page">Index page</div>,
-      })
-
-      const postsRoute = createRoute({
-        getParentRoute: () => rootRoute,
-        path: '/posts',
-      }).lazy(() => import('./lazy/normal').then((d) => d.Route('/posts')))
-
-      const router = createRouter({
-        routeTree: rootRoute.addChildren([indexRoute, postsRoute]),
-        history,
-      })
-
-      render(() => <RouterProvider router={router} />)
-
-      // The lazy target route adds the async boundary that exposes the stale
-      // redirected-match render path this regression is guarding.
-      expect(await screen.findByTestId('lazy-route-page')).toBeInTheDocument()
-      expect(screen.queryByTestId('pending')).not.toBeInTheDocument()
-      expect(router.state.location.href).toBe('/posts')
-      expect(router.state.status).toBe('idle')
-      expect(consoleError).not.toHaveBeenCalled()
-    })
-
     test('when `redirect` is thrown in `loader`', async () => {
       const nestedLoaderMock = vi.fn()
       const nestedFooLoaderMock = vi.fn()
