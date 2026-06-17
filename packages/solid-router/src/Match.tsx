@@ -271,7 +271,8 @@ export const MatchInner = (): any => {
           currentMatchState().key ?? currentMatchState().match.id
 
         const PendingComponent = () =>
-          route().options.pendingComponent ?? router.options.defaultPendingComponent
+          route().options.pendingComponent ??
+          router.options.defaultPendingComponent
 
         const pendingReplacement = () => {
           const pendingMatch = router.stores.pendingMatches
