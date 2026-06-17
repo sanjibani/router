@@ -1437,6 +1437,13 @@ export class RouterCore<
   ): Array<AnyRouteMatch> {
     const throwOnError = opts?.throwOnError
     const preload = opts?.preload
+    // Internal matching must prefer live owners over cached duplicates. The
+    // public getMatch is cached-first for compatibility, but using that here
+    // can seed preload children with stale cached parent context.
+    const getExistingMatch = (matchId: string) =>
+      this.stores.pendingMatchStores.get(matchId)?.get() ??
+      this.stores.matchStores.get(matchId)?.get() ??
+      this.stores.cachedMatchStores.get(matchId)?.get()
     const matchedRoutesResult = this.getMatchedRoutes(next.pathname)
     const { foundRoute, routeParams } = matchedRoutesResult
     let { matchedRoutes } = matchedRoutesResult
@@ -1554,7 +1561,7 @@ export class RouterCore<
         // explicit deps
         loaderDepsHash
 
-      const existingMatch = this.getMatch(matchId)
+      const existingMatch = getExistingMatch(matchId)
 
       const previousMatch = previousActiveMatchesByRouteId.get(route.id)
 
@@ -1680,7 +1687,7 @@ export class RouterCore<
     for (let index = 0; index < matches.length; index++) {
       const match = matches[index]!
       const route = this.looseRoutesById[match.routeId]!
-      const existingMatch = this.getMatch(match.id)
+      const existingMatch = getExistingMatch(match.id)
 
       // Update the match's params
       const previousMatch = previousActiveMatchesByRouteId.get(match.routeId)
@@ -2865,7 +2872,6 @@ export class RouterCore<
     let matches = this.matchRoutes(next, {
       throwOnError: true,
       preload: true,
-      dest: opts,
     })
 
     const activeMatchIds = new Set([
@@ -2889,7 +2895,7 @@ export class RouterCore<
         router: this,
         matches,
         location: next,
-        preload: true,
+        preload: activeMatchIds,
         updateMatch: (id, updater) => {
           // Don't update matches that were active when the preload started.
           if (activeMatchIds.has(id)) {

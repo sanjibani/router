@@ -921,6 +921,168 @@ describe('loader skip or exec', () => {
     expect(head).toHaveBeenCalledTimes(1)
   })
 
+  test('preloadRoute returns cache-owned matches with loaderData after load', async () => {
+    const loader = vi.fn(() => ({ source: 'preload' }))
+    const router = setup({ loader })
+
+    const matches = await router.preloadRoute({ to: '/foo' })
+    const match = matches?.find((d) => d.id === '/foo/foo')
+
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(match?.loaderData).toEqual({ source: 'preload' })
+  })
+
+  test('head assetContext.matches sees lane-updated loaderData', async () => {
+    const parentLoader = vi.fn(() => ({ parent: 'data' }))
+    const seenParentLoaderData: Array<unknown> = []
+
+    const rootRoute = new BaseRootRoute({})
+    const parentRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/parent',
+      loader: parentLoader,
+    })
+    const childRoute = new BaseRoute({
+      getParentRoute: () => parentRoute,
+      path: '/child',
+      head: ({ matches }) => {
+        seenParentLoaderData.push(
+          matches.find((match) => match.routeId === parentRoute.id)?.loaderData,
+        )
+        return { meta: [{ title: 'Child' }] }
+      },
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([parentRoute.addChildren([childRoute])]),
+      history: createMemoryHistory(),
+    })
+
+    await router.preloadRoute({ to: '/parent/child' })
+
+    expect(parentLoader).toHaveBeenCalledTimes(1)
+    expect(seenParentLoaderData).toEqual([{ parent: 'data' }])
+  })
+
+  test('same-location load prefers active match over cached duplicate with same id', async () => {
+    const loader = vi.fn(() => ({ source: 'active' }))
+    const router = setup({ loader, staleTime: Infinity })
+
+    await router.navigate({ to: '/foo' })
+
+    const activeMatch = router.state.matches.find((match) =>
+      match.id.endsWith('/foo'),
+    )!
+
+    router.stores.setCached([
+      ...router.stores.cachedMatches.get(),
+      {
+        ...activeMatch,
+        loaderData: { source: 'cached' },
+        preload: true,
+      },
+    ])
+
+    await router.load()
+
+    const loadedMatch = router.state.matches.find(
+      (match) => match.id === activeMatch.id,
+    )
+
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(loadedMatch?.loaderData).toEqual({ source: 'active' })
+  })
+
+  test('preload child context uses active parent over cached duplicate with same id', async () => {
+    const seenParentContext: Array<unknown> = []
+
+    const rootRoute = new BaseRootRoute({})
+    const parentRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/parent',
+      context: () => ({ source: 'active' }),
+    })
+    const childRoute = new BaseRoute({
+      getParentRoute: () => parentRoute,
+      path: '/child',
+      context: ({ context }) => {
+        seenParentContext.push(context.source)
+        return {}
+      },
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([parentRoute.addChildren([childRoute])]),
+      history: createMemoryHistory({ initialEntries: ['/parent'] }),
+    })
+
+    await router.load()
+
+    const activeParent = router.state.matches.find(
+      (match) => match.routeId === parentRoute.id,
+    )!
+
+    router.stores.setCached([
+      ...router.stores.cachedMatches.get(),
+      {
+        ...activeParent,
+        __routeContext: { source: 'cached' },
+        context: { source: 'cached' },
+        preload: true,
+      },
+    ])
+
+    await router.preloadRoute({ to: '/parent/child' })
+
+    expect(seenParentContext).toEqual(['active'])
+  })
+
+  test('active redirect ignores cached duplicate ownership by id', async () => {
+    const rootRoute = new BaseRootRoute({})
+    const fooRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/foo',
+      loader: () => redirect({ to: '/bar' }),
+    })
+    const barRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/bar',
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([fooRoute, barRoute]),
+      history: createMemoryHistory({ initialEntries: ['/foo'] }),
+    })
+
+    const location = router.latestLocation
+    const matches = router.matchRoutes(location)
+    const fooMatch = matches.find((match) => match.routeId === fooRoute.id)!
+    const activeLoadPromise = fooMatch._nonReactive.loadPromise
+
+    router.stores.setPending(matches)
+    router.stores.setCached([
+      ...router.stores.cachedMatches.get(),
+      {
+        ...fooMatch,
+        preload: true,
+        status: 'success',
+      },
+    ])
+
+    await expect(
+      loadMatches({
+        router,
+        location,
+        matches,
+        updateMatch: router.updateMatch,
+      }),
+    ).rejects.toMatchObject({
+      options: expect.objectContaining({ to: '/bar' }),
+    })
+
+    expect(activeLoadPromise?.status).toBe('pending')
+  })
+
   test('exec on regular nav', async () => {
     const loader = vi.fn(() => Promise.resolve({ hello: 'world' }))
     const router = setup({ loader })
@@ -1199,6 +1361,82 @@ describe('loader skip or exec', () => {
 
       resolveBar()
       await Promise.all([preload, navigation])
+
+      expect(router.state.location.pathname).toBe('/bar')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('active-join preload rethrows redirect without clearing active owner loadPromise', async () => {
+    vi.useFakeTimers()
+
+    try {
+      let rejectFoo!: (error: unknown) => void
+      let resolveBar!: () => void
+      const rootRoute = new BaseRootRoute({})
+      const indexRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/',
+      })
+      const fooRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/foo',
+        pendingMs: 1,
+        pendingComponent: {},
+        loader: () =>
+          new Promise((_resolve, reject) => {
+            rejectFoo = reject
+          }),
+      })
+      const barRoute = new BaseRoute({
+        getParentRoute: () => rootRoute,
+        path: '/bar',
+        loader: () =>
+          new Promise<void>((resolve) => {
+            resolveBar = resolve
+          }),
+      })
+      const router = createTestRouter({
+        routeTree: rootRoute.addChildren([indexRoute, fooRoute, barRoute]),
+        history: createMemoryHistory({ initialEntries: ['/'] }),
+      })
+
+      await router.load()
+
+      const navigation = router.navigate({ to: '/foo' })
+      await vi.waitFor(() => expect(rejectFoo).toBeTypeOf('function'))
+      await vi.advanceTimersByTimeAsync(1)
+      await vi.waitFor(() =>
+        expect(
+          router.state.matches.some(
+            (match) => match.id === '/foo/foo' && match.status === 'pending',
+          ),
+        ).toBe(true),
+      )
+
+      const activeFoo = router.state.matches.find(
+        (match) => match.id === '/foo/foo',
+      )!
+      const activeLoadPromise = activeFoo._nonReactive.loadPromise
+      expect(activeLoadPromise?.status).toBe('pending')
+
+      const preload = router.preloadRoute({ to: '/foo' })
+      await Promise.resolve()
+
+      rejectFoo(redirect({ to: '/bar' }))
+      await vi.waitFor(() =>
+        expect(
+          router.stores.pendingMatches
+            .get()
+            .some((match) => match.id === '/bar/bar'),
+        ).toBe(true),
+      )
+
+      expect(activeLoadPromise?.status).toBe('pending')
+
+      resolveBar()
+      await Promise.all([navigation, preload])
 
       expect(router.state.location.pathname).toBe('/bar')
     } finally {
@@ -3285,6 +3523,39 @@ describe('routeId in context options', () => {
 })
 
 describe('beforeLoad context lifecycle', () => {
+  test('cached preload reload commits fresh beforeLoad context to returned match context', async () => {
+    let token = 'one'
+    const beforeLoad = vi.fn(() => ({ token }))
+
+    const rootRoute = new BaseRootRoute({})
+    const fooRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/foo',
+      beforeLoad,
+      preloadStaleTime: Infinity,
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([fooRoute]),
+      history: createMemoryHistory(),
+    })
+
+    const first = await router.preloadRoute({ to: '/foo' })
+    const firstMatch = first?.find((match) => match.routeId === fooRoute.id)
+
+    expect(firstMatch?.__beforeLoadContext).toEqual({ token: 'one' })
+    expect(firstMatch?.context).toMatchObject({ token: 'one' })
+
+    token = 'two'
+
+    const second = await router.preloadRoute({ to: '/foo' })
+    const secondMatch = second?.find((match) => match.routeId === fooRoute.id)
+
+    expect(beforeLoad).toHaveBeenCalledTimes(2)
+    expect(secondMatch?.__beforeLoadContext).toEqual({ token: 'two' })
+    expect(secondMatch?.context).toMatchObject({ token: 'two' })
+  })
+
   test('clears stale beforeLoad context when a later run returns undefined', async () => {
     let returnContext = true
     const seenContexts: Array<Record<string, unknown>> = []
