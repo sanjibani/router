@@ -182,5 +182,5 @@ export function parseRedirect(obj: any) {
     return redirect(obj)
   }
 
-  return
+  return undefined
 }
