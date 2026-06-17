@@ -2879,7 +2879,11 @@ export class RouterCore<
         continue
       }
 
-      await this.getMatch(id)?._nonReactive.beforeLoadPromise
+      const beforeLoadPromise =
+        this.getMatch(id)?._nonReactive.beforeLoadPromise
+      if (beforeLoadPromise) {
+        await beforeLoadPromise
+      }
 
       const settledMatch = this.getMatch(id)
       if (

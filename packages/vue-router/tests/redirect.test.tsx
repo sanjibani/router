@@ -4,7 +4,6 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
   Link,
-  Outlet,
   RouterProvider,
   createMemoryHistory,
   createRootRoute,

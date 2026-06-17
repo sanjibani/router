@@ -283,13 +283,19 @@ const handleSerialError = (
   inner.firstBadMatchIndex ??= index
   match.__beforeLoadContext = undefined
 
-  handleRedirectOrNotFound(inner, inner.router.getMatch(matchId), err)
+  const currentMatch = inner.router.getMatch(matchId)
+  if (currentMatch) {
+    currentMatch.__beforeLoadContext = undefined
+  }
+
+  handleRedirectOrNotFound(inner, currentMatch, err)
 
   try {
     route.options.onError?.(err)
   } catch (errorHandlerErr) {
     err = errorHandlerErr
-    handleRedirectOrNotFound(inner, inner.router.getMatch(matchId), err)
+    // The current match's pending beforeLoad context was already cleared above.
+    handleRedirectOrNotFound(inner, currentMatch, err)
   }
 
   // A match that errors during the beforeLoad phase never reaches the loader
@@ -304,9 +310,9 @@ const handleSerialError = (
     abortController: new AbortController(),
   })
 
-  const currentMatch = inner.router.getMatch(matchId)
-  if (currentMatch) {
-    clearMatchPromises(currentMatch)
+  const updatedMatch = inner.router.getMatch(matchId)
+  if (updatedMatch) {
+    clearMatchPromises(updatedMatch)
   }
 
   if (!inner.preload) {
@@ -1161,10 +1167,11 @@ export async function loadMatches(arg: {
 
     notFoundToThrow.routeId = boundaryMatch.routeId
 
-    patchMatch(
+    commitMatch(
       inner,
       boundaryMatch.id,
-      boundaryMatch.routeId === inner.router.routeTree.id
+      renderedBoundaryIndex,
+      boundaryMatch.routeId === rootRouteId
         ? // For root boundary, use globalNotFound so the root component's
           // shell still renders and <Outlet> handles the not-found display,
           // instead of replacing the entire root shell via status='notFound'.
