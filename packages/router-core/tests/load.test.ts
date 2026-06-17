@@ -869,6 +869,58 @@ describe('loader skip or exec', () => {
     expect(shouldReload).not.toHaveBeenCalled()
   })
 
+  test('active preload joins active match instead of cached duplicate with same id', async () => {
+    const loader = vi.fn(() => ({ source: 'active' }))
+    const router = setup({ loader })
+
+    await router.navigate({ to: '/foo' })
+
+    const activeMatch = router.state.matches.find((match) =>
+      match.id.endsWith('/foo'),
+    )!
+
+    router.stores.setCached([
+      ...router.stores.cachedMatches.get(),
+      {
+        ...activeMatch,
+        loaderData: { source: 'cached' },
+        preload: true,
+      },
+    ])
+
+    const matches = await router.preloadRoute({ to: '/foo' })
+    const preloadedMatch = matches?.find((match) => match.id === activeMatch.id)
+
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(preloadedMatch?.loaderData).toEqual({ source: 'active' })
+  })
+
+  test('active preload does not execute active head hooks', async () => {
+    const loader = vi.fn(() => ({ source: 'active' }))
+    const head = vi.fn(() => ({ meta: [{ title: 'Foo' }] }))
+
+    const rootRoute = new BaseRootRoute({})
+    const fooRoute = new BaseRoute({
+      getParentRoute: () => rootRoute,
+      path: '/foo',
+      loader,
+      head,
+    })
+
+    const router = createTestRouter({
+      routeTree: rootRoute.addChildren([fooRoute]),
+      history: createMemoryHistory(),
+    })
+
+    await router.navigate({ to: '/foo' })
+    expect(head).toHaveBeenCalledTimes(1)
+
+    await router.preloadRoute({ to: '/foo' })
+
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(head).toHaveBeenCalledTimes(1)
+  })
+
   test('exec on regular nav', async () => {
     const loader = vi.fn(() => Promise.resolve({ hello: 'world' }))
     const router = setup({ loader })
